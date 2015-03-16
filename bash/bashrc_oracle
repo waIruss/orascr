@@ -1,0 +1,9 @@
+alias dba='sqlplus "/ as sysdba"'
+alias crs_stat='/home/oracle/orascr/grid/crs_stat.sh'
+alias db_env='. ~/orascr/ebs/db_env'
+alias app_env='. ~/orascr/ebs/app_env'
+alias autoconfig_app='/u01/oracle/prodcomn/admin/scripts/PROD_ebs11/adautocfg.sh'
+alias autoconfig_db='/u01/oracle/proddb/9.2.0/appsutil/scripts/PROD_ebs11/adautocfg.sh'
+
+#11.2.0
+alias autoconfig_db='/u01/oracle/proddb/11.2.0.3/appsutil/scripts/PROD_ebs11/adautocfg.sh'

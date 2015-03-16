@@ -1,0 +1,539 @@
+####################################################################
+#
+# Oracle Applications Release 11i common database initialization parameters
+#
+# The following represents the common database initialization
+# parameters file for Oracle Applications Release 11i.
+# Release-specific parameters are listed in the respective release
+# section. The release-specific parameters should be appended to the
+# common database initialization parameter file.
+#
+# There are numerous mandatory database initialization parameters,
+# the settings of which must not be altered. Use of values other than
+# those provided in this document will not be supported unless Oracle
+# Support has specifically instructed you to alter these parameters
+# from their mandatory settings.
+#
+# Mandatory parameters are denoted with the (MP) symbol as a
+# comment. They include parameters such as NLS and optimizer
+# related parameters.
+#
+# The remaining parameters relate to either sizing or configuration,
+# and the correct values will be specific to a particular environment
+# and system capacity. A sizing table provides recommendations and
+# guidelines based on the number of deployed and active Applications
+# users. Customers can adjust these parameters to suit their
+# environment and system resource capacity.
+#
+#####################################################################
+
+#########
+#
+# Database parameters
+#
+# The database parameters define the name of the database and
+# the names of the control files.
+#
+# The database name is established when the database is built,
+# and for most customers matches the instance name. It should not
+# normally be necessary to change the database name, except for
+# the purposes of database cloning.
+#
+# There should be at least two control files, preferably three,
+# located on different volumes in case one of the volumes fails.
+# Control files can expand, hence you should allow at least 20M
+# per file for growth.
+#
+#########
+
+db_name = PROD
+control_files=('/u01/oracle/proddata/cntrl01.dbf','/u01/oracle/proddata/cntrl02.dbf','/u01/oracle/proddata/cntrl03.dbf')
+
+
+#########
+#
+# Database block size
+#
+# The required block size for Oracle Applications Release 11i is 8K.
+# No other block size may be used.
+#
+#########
+
+db_block_size = 8192 #MP
+
+
+#########
+#
+# Compatible
+#
+# Compatibility should be set to the current release.
+# Refer to the release specific section for the appropriate
+# value.
+#
+#########
+
+compatible = 11.2.0
+
+#########
+#
+# _system_trig_enabled
+#
+# The _system_trig_enabled must be set to TRUE.
+# If the _system_trig_enabled parameter is set to FALSE it will
+# prevent system triggers from being executed.
+#
+#########
+
+_system_trig_enabled = true #MP
+
+
+#########
+#
+# O7_DICTIONARY_ACCESSIBILITY
+#
+# O7_DICTIONARY_ACCESSIBILITY must be set to TRUE for Oracle
+# Applications release 11.5.9 or lower. For release 11.5.10
+# (or higher), O7_DICTIONARY_ACCESSIBILITY should be set to
+# FALSE. Uncomment the appropriate line below, based on your
+# Applications release level.
+#
+#########
+
+O7_DICTIONARY_ACCESSIBILITY = FALSE #MP 11.5.10 or higher
+
+
+#########
+# NLS parameters
+#
+# Some NLS parameter values are marked as being required 11i settings.
+# These are the only supported settings for these parameters for
+# Applications Release 11i and must not be modified to other values.
+# Other NLS parameters have been given default values.
+#
+#########
+
+nls_territory = america
+nls_date_format = DD-MON-RR #MP
+nls_numeric_characters = ".,"
+nls_sort = binary #MP
+nls_comp = binary #MP
+nls_length_semantics = BYTE #MP
+
+
+#########
+#
+# Multi-threaded Server (MTS)
+#
+# Most Oracle Applications customers DO NOT need to use MTS,
+# and the default configuration disables MTS.
+#
+# If MTS is used, it can have a dramatic effect on the SGA, as
+# session memory, including sort and cursor areas, reside in the
+# SGA.
+#
+# Configuring MTS requires the large pool to be allocated. The
+# minimum size for the large pool is 50M.
+#
+#########
+
+
+#########
+#
+# Auditing and Security
+#
+# There is a performance overhead for auditing. In addition,
+# the database administrator will need to implement a purge
+# policy for the SYS.AUD$ table.
+#
+# Statement level auditing should not be used.
+#
+# Some products require max_enabled_roles to be set.
+# The value should be set to 100.
+#
+#########
+
+# audit_trail = true # Uncomment this line if you want to enable auditing
+
+
+########
+#
+# Dump parameters
+#
+# These specify the destination of the trace and core files, and
+# would normally point into the appropriate OFA trace
+# directories. The maximum size of a dump file can be changed at
+# the session level, and prevents a trace file using an excessive
+# amount of disk space.
+#
+########
+
+diagnostic_dest = /u01/oracle
+max_dump_file_size = 20480 # Limit default trace file size to 10 MB.
+
+
+########
+#
+# Timed statistics
+#
+# On most platforms, enabling timed statistics has minimal effect
+# on performance. It can be enabled/disabled dynamically at
+# both the system and session level.
+#
+# Timed statistics is required for SQL trace and Statspack.
+#
+########
+
+#timed_statistics = true
+
+
+########
+#
+# Trace parameters
+#
+#
+# _trace_files_public
+#
+# As the data server machine should be in a secure environment,
+# setting to true enables trace file analysis.
+########
+
+_trace_files_public = TRUE
+
+
+########
+# Oracle Trace
+#
+# SQL trace should be disabled at the instance level and enabled
+# for specific sessions as needed via the Application or
+# profiles.
+#
+#sql_trace=FALSE
+
+########
+#
+# Fixed SGA
+#
+# The fixed SGA parameters represent resources that have their
+# sizes fixed on startup. If the maximum size is reached (e.g. no.
+# of sessions), then the resource is unavailable until freed by
+# the instance. Refer to Appendix D: Database Initialization
+# Parameter Sizing.
+#
+########
+
+
+# Processes/sessions
+#
+# A database process can be associated with one or more database
+# sessions. For all technology stack components other than Oracle
+# Forms, there is a one-to-one mapping between sessions and
+# processes.
+#
+# For Forms processes, there will be one database session per
+# open form, with a minimum of two sessions per Forms user
+# (one for the navigator form, and one for the active form).
+#
+# Sessions should be set to twice the value of processes.
+
+processes = 200 # Max. no. of users
+sessions = 400 # 2 x no. of processes
+db_files = 512 # Max. no. of database files
+dml_locks = 10000 # Database locks
+#enqueue_resources = 32000 # Max. no. of concurrent
+
+
+########
+#
+# Cursor-related settings.
+#
+########
+
+cursor_sharing = EXACT #MP
+open_cursors = 600
+session_cached_cursors = 500
+
+
+########
+#
+# Buffer Cache
+#
+# The buffer cache requires ( db_block_size x db_block_buffers )
+# bytes within the SGA. Its sizing can have a significant effect
+# on performance. Values less than 20,000 are unrealistic for
+# most customers, and can be increased as memory permits.
+#
+# The use of multiple buffer pools for Oracle Applications is not
+# supported. Only a single buffer pool should be used (i.e. the
+# default).
+#
+########
+
+sga_target = 1G
+#db_block_buffers = 20000
+db_block_checking = FALSE
+db_block_checksum = TRUE
+
+
+########
+#
+# Log Writer
+#
+# The log writer parameters control the size of the log buffer
+# within the SGA and how frequently the redo logs are check
+# pointed (all dirty buffers written to disk to create a new
+# recovery point).
+#
+# A value of 10MB for the log buffer is a reasonable value for
+# Oracle Applications and it represents a balance between
+# concurrent programs and online users. The value of log_buffer
+# must be a multiple of redo block size, normally 512 bytes.
+#
+# The checkpoint interval and timeout control the frequency of
+# checkpoints.
+#
+########
+
+log_checkpoint_timeout = 1200 # Checkpoint at least every 20 mins.
+log_checkpoint_interval = 100000
+log_buffer = 10485760
+log_checkpoints_to_alert = TRUE
+
+
+#
+# Shared Pool
+#
+# It is important to tune the shared pool so as to minimize
+# contention for SQL and PL/SQL objects. A value of 400M is a
+# reasonable starting point for 11i with a 40M reserved area
+# (10%).
+#
+########
+
+shared_pool_size = 400M
+shared_pool_reserved_size = 40M
+#_shared_pool_reserved_min_alloc = 4100
+
+
+# cursor_space_for_time
+#
+# Cursor space for time is an optimization which essentially
+# results in holding pins on cursors and their associated
+# frames/buffers for longer periods of time. The pins are held
+# until the cursor is closed as opposed to at the end-of-fetch
+# (normal behavior). This reduces library cache pin traffic
+# which reduces library cache latch gets. Cursor space for time
+# is useful for large Applications environments whereby library
+# cache latch contention, specifically due to pin gets, is an
+# issue (in terms of performance).
+#
+# Cursor space for time requires at least a 50% increase in the
+# size of the shared pool because of the frames/buffers. If the
+# Stats pack reports show that the waits for library cache latch
+# gets is significant, and the latch gets are due to pin
+# requests, then cursor space for time can be used to improve
+# performance.
+#
+# It is important to note that library cache latch contention can
+# be caused by numerous different factors including the use of
+# non-sharable SQL (i.e. literals), lack of space, frequent
+# loads/unloads, invalidation, patching, gathering statistics
+# frequently and during peak periods, pin requests, etc.
+# Cursor space for time is designed to optimize pin requests,
+# and will not reduce latch contention for the other issues.
+#
+# cursor_space_for_time = FALSE # disabled by default
+
+
+########
+#
+# Java Pool
+#
+# 11i uses Java Stored Procedures, hence an initial setting of
+# 50M is used. The java pool size may need to be increased as
+# required.
+#
+########
+
+#java_pool_size = 50M
+
+
+########
+#
+# PL/SQL parameters
+#
+# The utl_file_dir must be set as per the installation manuals.
+# utl_file_dir = , ...
+#
+########
+
+utl_file_dir='/usr/tmp','/u01/oracle/proddb/9.2.0/appsutil/outbound/PROD_ebs11'
+
+
+########
+#
+# Advanced Queuing (AQ) and Job Queues
+#
+# AQ requires the TM process to handle delayed messages. A number
+# of Application modules use AQ, including Workflow. Job Queues
+# enable advanced queue to submit background jobs.
+#
+# The minimum (and recommended) value for aq_tm_processes is 1.
+# However, the value can be increased to meet specific needs.
+# For example, increasing the value to 2 can help reduce
+# excessive queue lengths.
+#
+########
+
+aq_tm_processes = 1
+job_queue_processes = 2
+
+
+########
+#
+# Archiving
+#
+# Archiving parameters, including destination (optionally,
+# multiple destinations in 9i) need to be specified.
+#
+########
+
+# log_archive_start = true # Uncomment this line if you want to enable automatic archiving
+
+
+########
+#
+# Parallel Execution
+#
+# Some of the Applications Concurrent Programs use parallel
+# execution including DBI programs and Gathering Statistics.
+#
+# AD will also use parallel execution when creating large
+# indexes.
+#
+# Parallel execution uses the large_pool for message buffers
+# and the large_pool_size should be sized as per the guidelines
+# in the large pool section.
+#
+########
+
+parallel_max_servers = 8 # Max. value should be 2 x no. of CPUs
+parallel_min_servers = 0
+
+
+########
+#
+# Events
+#
+# Events are used by Oracle Support and Development. They should
+# only be set as requested.
+#
+# Refer to the data server release specific section for the
+# compatible = 10.2.0 | 10.1.0 | 9.2.0 | 8.1.7 #MP
+# events which must be set.
+#
+########
+
+
+#########
+#
+# Optimizer
+#
+# Release 11i uses the Cost Based Optimizer (CBO). The
+# following optimizer parameters must be set as below, and should
+# not be changed. Values other than the documented values below
+# are not supported.
+#
+# Refer also to the release specific section for additional
+# optimizer parameters which must be set.
+#########
+
+#db_file_multiblock_read_count = 8 #MP
+#optimizer_max_permutations = 2000 #MP
+#query_rewrite_enabled = true #MP
+_sort_elimination_cost_ratio = 5 #MP
+_like_with_bind_as_equality = TRUE #MP
+_fast_full_scan_enabled = FALSE #tmap_plans = FALSE #MP
+optimizer_secure_view_merging = FALSE #MP
+_optimizer_autostats_job=false #MP Turn off automatic statisticsMP
+#_sqlexec_progression_cost = 2147483647 #MP
+
+
+#########
+#
+# Oracle Real Application Clusters (Oracle RAC)
+#
+# The following parameters should be set when running
+# the E-Business Suite in an Oracle RAC environment.
+
+max_commit_propagation_delay = 0 #MP
+#cluster_database = TRUE #MP
+
+# Parallel Execution and Oracle RAC
+#
+# It is recommended to set the parameters PARALLEL_INSTANCE_GROUP
+# and INSTANCE_GROUPS appropriately on each instance to ensure that
+# parallel requests do not span instances. For example, on instance1,
+# set instance_groups=apps1 and parallel_instance_group=apps1. On
+# instance2, set instance_groups=apps2 and parallel_instance_group=apps2.
+#
+#########
+
+########
+#
+# Rollback Segments
+#
+# From 9iR2, Oracle Applications requires the use of System Managed Undo.
+# This is straightforward to manage and administer, much more efficient
+# than manually managed rollback segments, and reduces the chances of
+# "snapshot too old" errors. To use System Managed Undo, you must create
+# an UNDO tablespace.
+#
+########
+
+undo_management=AUTO #MP
+undo_tablespace=APPS_UNDOTS1 #MP
+
+########
+#
+# Private Memory Areas
+#
+# The Automatic Memory Manager is used to manage PGA memory. This avoids
+# the need to tune sort_area_size and hash_area_size manually.
+#
+# The Automatic Memory Manager also improves performance and scalability,
+# as memory is released back to the operating system.
+#
+########
+
+pga_aggregate_target = 1G
+workarea_size_policy = AUTO #MP
+olap_page_pool_size = 4194304
+
+
+#########
+#
+# Parallel Execution and Oracle RAC parameters
+#
+# It is recommended to set the parameters PARALLEL_FORCE_LOCAL
+# on each instance, to ensure that parallel requests do not span instances.
+# As of 11gR2, EBS customers must set the value of this parameter to TRUE
+# and then are no longer required to set parallel_instance_groups and
+# instance groups for the purpose of preventing inter-instance sql
+# parallelism in RAC environments.
+#
+#########
+
+parallel_force_local=TRUE #MP
+
+#########
+#
+# Database Password Case Sensitivity (new with Oracle Database 11g)
+#
+# Database password case sensitivity is a new feature available with 11g.
+# Oracle E-Business Suite does not currently integrate with this feature,
+# so the parameter must be set to FALSE.
+#
+#########
+
+sec_case_sensitive_logon = FALSE #MP
+

@@ -1,0 +1,11 @@
+#. /u01/oracle/proddb/9.2.0/PROD_ebs11.env
+#. /u01/oracle/proddb/11.2.0.3/PROD_ebs11.env
+
+SQLPATH=$HOME/scripto/oracle/sqlbin
+export SQLPATH
+echo -----------------------------------
+echo "Choose env:"
+echo -----------------------------------
+# ebs11_vbox
+. /home/oracle/orascr/ebs/sites/ebs11_vbox.sh
+

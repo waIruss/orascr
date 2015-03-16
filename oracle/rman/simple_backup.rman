@@ -1,0 +1,9 @@
+run
+{
+ALLOCATE CHANNEL ch1 DEVICE TYPE DISK;
+BACKUP DATABASE FORMAT "/u03/backups/rman_backup_20140811/db_%U";
+Sql 'ALTER SYSTEM ARCHIVE LOG CURRENT';
+BACKUP ARCHIVELOG ALL format '/u03/backups/rman_backup_20140811/arch_%U';
+BACKUP CURRENT CONTROLFILE FORMAT '/u03/backups/rman_backup_20140811/ctrl_%U';
+}
+

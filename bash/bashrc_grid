@@ -1,0 +1,2 @@
+alias dba='sqlplus "/ as sysasm"'
+alias crs_stat='/home/grid/orascr/grid/crs_stat.sh'

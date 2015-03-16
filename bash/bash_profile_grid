@@ -1,0 +1,30 @@
+# .bash_profile
+
+# Get the aliases and functions
+if [ -f ~/.bashrc ]; then
+        . ~/.bashrc
+fi
+
+# User specific environment and startup programs
+umask 022
+
+export PATH=/usr/kerberos/bin:/usr/local/bin:/bin:/usr/bin:/home/grid/bin
+
+export TMP=/tmp
+export TMPDIR=$TMP
+export TEMP=$TMP
+
+export ORACLE_BASE=/u01/app/grid
+export GRID_HOME=/u01/app/11.2.0/grid
+export ORACLE_HOME=$GRID_HOME
+export ORACLE_SID=+ASM1
+
+export ORACLE_TERM=xterm
+export NLS_DATE_FORMAT="DD-MON-YYYY HH24:MI:SS"
+#export TNS_ADMIN=$ORACLE_HOME/network/admin
+
+
+export PATH=$ORACLE_HOME/bin:$PATH
+export DISPLAY=192.168.199.155:0
+export SVN_EDITOR=vim
+

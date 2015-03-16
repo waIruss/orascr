@@ -1,0 +1,8 @@
+RUN	
+{
+	ALLOCATE CHANNEL ch1 DEVICE TYPE DISK;
+	BACKUP DATABASE FORMAT '/u01/oracle/rman/db_%U';
+	BACKUP ARCHIVELOG ALL format '/u01/oracle/rman/arch_%U';
+	BACKUP CURRENT CONTROLFILE FORMAT '/u01/oracle/rman/ctrl_%U';
+}
+
