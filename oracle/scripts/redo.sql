@@ -1,4 +1,4 @@
-
+alter session set NLS_DATE_FORMAT = 'mm-dd-yy HH24:mi';
 set feed off;
 set pagesize 10000;
 set wrap off;
@@ -13,8 +13,11 @@ set verify off;
 ttitle left 'Redolog File Status from V$LOG' skip 2
 
 select group#, sequence#, thread#,
-       Members, archived, status, first_time, bytes/1024/10024 "size_MB"
+       Members, archived, status, first_time, bytes/1024/1024 "size_MB"
   from v$log;
+
+ttitle left 'Standby log files from v$standby_log' skip 2
+select group#, sequence#, status, archived, bytes/1024/1024 "size_MB"  from v$standby_log;
 
 ttitle left 'Redolog file names' skip 2
 
