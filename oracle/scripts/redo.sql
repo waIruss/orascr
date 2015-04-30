@@ -13,7 +13,7 @@ set verify off;
 ttitle left 'Redolog File Status from V$LOG' skip 2
 
 select group#, sequence#, thread#,
-       Members, archived, status, first_time
+       Members, archived, status, first_time, bytes/1024/10024 "size_MB"
   from v$log;
 
 ttitle left 'Redolog file names' skip 2
@@ -53,7 +53,7 @@ where first_time >= TRUNC ( SYSDATE - 14 )
 order by 1;
 
 
-prompt "redo size history " 
+ttitle left 'Redo size history' skip 2
 set pagesize 1000
 
 SELECT ROUND( (  COUNT(*) * (SELECT MIN ( bytes ) FROM v$log ))/1024/1024 ) as REDO_SIZE_MB, TO_CHAR( first_time,'yyyy-mm-dd') "DAY"
@@ -62,7 +62,7 @@ WHERE first_time >= TRUNC ( SYSDATE - 14 )
 GROUP BY TO_CHAR( first_time,'yyyy-mm-dd')
 ORDER BY 2; 
 
-prompt "AVARAGE DAILY REDO 14 DAYS " 
+ttitle left 'AVARAGE DAILY REDO 14 DAYS' skip 2
 select ROUND ( avg ( redo_size_mb ) , 0 )  ,ROUND ( MAX ( redo_size_mb ) , 0 ) , ROUND ( MIN ( redo_size_mb ) , 0 )
 from
 (
@@ -74,7 +74,13 @@ ORDER BY 2
 );
 
 
-prompt "############# V$INSTANCE_RECOVERY #########################"
-exec adm_package.print_table('select * from V$INSTANCE_RECOVERY ');
+ttitle left '############# V$INSTANCE_RECOVERY #########################' skip 2
+SELECT  RECOVERY_ESTIMATED_IOS, ACTUAL_REDO_BLKS, TARGET_REDO_BLKS, 
+LOG_CHKPT_TIMEOUT_REDO_BLKS
+FROM SYS.V_$INSTANCE_RECOVERY;
 
+
+SELECT 
+   FAST_START_IO_TARGET_REDO_BLKS, TARGET_MTTR, ESTIMATED_MTTR, OPTIMAL_LOGFILE_SIZE, ESTD_CLUSTER_AVAILABLE_TIME
+   FROM SYS.V_$INSTANCE_RECOVERY;
 
