@@ -20,6 +20,7 @@ export ORACLE_BASE=/u01/app/oracle
 export ORACLE_HOME=$ORACLE_BASE/product/11.2.0/dbhome_1
 export GRID_HOME=/u01/app/11.2.0/grid
 export ORACLE_SID=ORCL1
+export ORACLE_UNQNAME=orcl
 export ORACLE_TERM=xterm
 export NLS_DATE_FORMAT="DD-MON-YYYY HH24:MI:SS"
 
@@ -28,4 +29,4 @@ export PATH=$ORACLE_HOME/bin:$PATH
 export DISPLAY=192.168.199.155:0
 export SVN_EDITOR=vim
 export PS1="(\A)[\u@\h \W ]\$ "
-
+export SQLPATH=/home/oracle/orascr/oracle/scripts
