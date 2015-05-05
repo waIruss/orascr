@@ -14,14 +14,14 @@ ttitle left 'Redolog File Status from V$LOG' skip 2
 
 select group#, sequence#, thread#,
        Members, archived, status, first_time, bytes/1024/1024 "size_MB"
-  from v$log;
+  from v$log order by 3,1;
 
 ttitle left 'Standby log files from v$standby_log' skip 2
 select group#, sequence#, status, archived, bytes/1024/1024 "size_MB"  from v$standby_log;
 
 ttitle left 'Redolog file names' skip 2
 
-select group#, member from v$logfile;
+select group#, type, member from v$logfile order by 2,1;
 
 ttitle left 'Number of Logswitches per Hour' skip 2
 
