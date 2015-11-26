@@ -3,7 +3,7 @@ col status format a10
 col destination format a45
 col alternate format a20
 col valid_now format a9
-select dest_name, status, destination, alternate, valid_now from v$archive_dest;
+select dest_name, status, destination, alternate, valid_now, error from v$archive_dest;
 
 prompt ============ po awarii
 prompt alter system set log_archive_dest_state_1=enable scope=both sid='*';
