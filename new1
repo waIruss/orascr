@@ -1,0 +1,95 @@
+#!/bin/bash
+
+# To set
+DBSERVICE=TSTDB1
+LOG=obs1-service.log
+GROUP_NAME=OBS1
+CUR_HOST=$(hostname -f)
+CUR_HOST_SHORT=$(hostname -s)
+NEW_MASTER=
+
+export ORACLE_HOME=/u01/app/oracle/client
+export PATH=$PATH:$ORACLE_HOME/bin
+export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:$ORACLE_HOME/lib:$ORACLE_HOME
+. /home/oracle/envobs1.sh
+
+# Run 'show observer' and capture output
+OBS_OUT=$("$ORACLE_HOME/bin/dgmgrl" -silent /@"$DBSERVICE" <<EOF
+SET OBSERVERCONFIGFILE=$OBSCONFIG
+SHOW OBSERVER
+EXIT
+EOF
+)
+
+printf '%s\n' "[Info] $(date +"%Y-%m-%d-%T") Checking for master observer..." >> "$LOG"
+printf '%s\n' "$OBS_OUT" >> "$LOG"
+
+MASTER_HOST=$(printf '%s\n' "$OBS_OUT" \
+  | sed -n '/- Master/,$p' \
+  | sed -n 's/^[[:space:]]*Host Name:[[:space:]]*//p' \
+  | head -n1)
+
+printf '%s\n' "[Info] $(date +"%Y-%m-%d-%T") Found master observer: $MASTER_HOST" >> "$LOG"
+
+# Decide if this host is the master observer
+if [[ "$MASTER_HOST" == "$CUR_HOST" || "$MASTER_HOST" == "$CUR_HOST_SHORT" ]]; then
+EXEC_OUT=$("$ORACLE_HOME/bin/dgmgrl" -echo /@"$DBSERVICE" <<EOF
+SET OBSERVERCONFIGFILE=$OBSCONFIG
+SET MASTEROBSERVERHOSTS FOR $GROUP_NAME TO $NEW_MASTER
+EXIT
+EOF
+)
+sleep 3
+EXEC_OUT2=$("$ORACLE_HOME/bin/dgmgrl" -echo /@"$DBSERVICE" <<EOF
+SET OBSERVERCONFIGFILE=$OBSCONFIG
+STOP OBSERVING $GROUP_NAME
+EXIT
+EOF
+)
+
+printf '%s\n' "[Info] $(date +"%Y-%m-%d-%T") Setting master observer to $NEW_MASTER and stopping observer $CUR_HOST" >> "$LOG"
+printf '%s\n' "$EXEC_OUT" >> "$LOG"
+printf '%s\n' "$EXEC_OUT2" >> "$LOG"
+else
+# not master; just stop
+EXEC_OUT3=$("$ORACLE_HOME/bin/dgmgrl" -echo /@"$DBSERVICE" <<EOF
+SET OBSERVERCONFIGFILE=$OBSCONFIG
+STOP OBSERVING $GROUP_NAME
+EXIT
+EOF
+)
+printf '%s\n' "[Info] $(date +"%Y-%m-%d-%T") Master observer running on $MASTER_HOST. Stopping observer $CUR_HOST" >> "$LOG"
+printf '%s\n' "$EXEC_OUT3" >> "$LOG"
+fi
+
+
+==================
+
+cat start_obs1.sh
+#!/bin/bash
+DBSERVICE=TSTDB1
+LOG=obs1-service.log
+GROUP_NAME=OBS1
+CUR_HOST=$(hostname -f)
+CUR_HOST_SHORT=$(hostname -s)
+NEW_MASTER=
+
+export ORACLE_HOME=/u01/app/oracle/client
+export PATH=$PATH:$ORACLE_HOME/bin
+export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:$ORACLE_HOME/lib:$ORACLE_HOME
+. /home/oracle/envobs1.sh
+
+printf '%s\n' "[Info] $(date +"%Y-%m-%d-%T") Starting observer "$CUR_HOST"" >> "$LOG"
+
+$ORACLE_HOME/bin/dgmgrl -echo /@$DBSERVICE <<EOF >> "$LOG"
+SET OBSERVERCONFIGFILE=$OBSCONFIG
+START OBSERVING $GROUP_NAME
+SHOW OBSERVERS
+EXIT;
+EOF
+sleep 5
+$ORACLE_HOME/bin/dgmgrl -echo /@$DBSERVICE <<EOF >> "$LOG"
+SET OBSERVERCONFIGFILE=$OBSCONFIG
+SET MASTEROBSERVERHOSTS FOR $GROUP_NAME TO $CUR_HOST
+EXIT;
+EOF
