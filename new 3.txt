@@ -1,0 +1,57 @@
+[oracle@is-obs3t obs1]$ cat stop_obs1.sh
+#!/bin/bash
+# To set
+DBSERVICE=TSTDB1
+GROUP_NAME=OBS1
+CUR_HOST=$(hostname -f)
+CUR_HOST_SHORT=$(hostname -s)
+LOG="$GROUP_NAME"_"$CUR_HOST_SHORT"_service.log
+
+
+export ORACLE_HOME=/u01/app/oracle/client
+export PATH=$PATH:$ORACLE_HOME/bin
+export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:$ORACLE_HOME/lib:$ORACLE_HOME
+. /home/oracle/envobs1.sh
+
+# try to stop observer, whenever it's master or not
+printf '%s\n' "[Info] $(date +"%Y-%m-%d-%T") Trying to stop observer $CUR_HOST..." >> "$LOG"
+EXEC_OUT=$("$ORACLE_HOME/bin/dgmgrl" -echo /@"$DBSERVICE" <<EOF
+SET OBSERVERCONFIGFILE=$OBSCONFIG
+STOP OBSERVING $GROUP_NAME
+EXIT
+EOF
+)
+printf '%s\n' "$EXEC_OUT" >> "$LOG"
+sleep 10
+[oracle@is-obs3t obs1]$
+[oracle@is-obs3t obs1]$
+[oracle@is-obs3t obs1]$
+[oracle@is-obs3t obs1]$ cat start_obs1.sh
+#!/bin/bash
+DBSERVICE=TSTDB1
+GROUP_NAME=OBS1
+CUR_HOST=$(hostname -f)
+CUR_HOST_SHORT=$(hostname -s)
+MASTER=
+LOG="$GROUP_NAME"_"$CUR_HOST_SHORT"_service.log
+
+export ORACLE_HOME=/u01/app/oracle/client
+export PATH=$PATH:$ORACLE_HOME/bin
+export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:$ORACLE_HOME/lib:$ORACLE_HOME
+. /home/oracle/envobs1.sh
+
+printf '%s\n' "[Info] $(date +"%Y-%m-%d-%T") Starting observer "$CUR_HOST"" >> "$LOG"
+
+$ORACLE_HOME/bin/dgmgrl -echo /@$DBSERVICE <<EOF >> "$LOG"
+SET OBSERVERCONFIGFILE=$OBSCONFIG
+START OBSERVING $GROUP_NAME
+SHOW OBSERVERS
+EXIT;
+EOF
+sleep 10
+printf '%s\n' "[Info] $(date +"%Y-%m-%d-%T") Setting master observer to "$MASTER"" >> "$LOG"
+$ORACLE_HOME/bin/dgmgrl -echo /@$DBSERVICE <<EOF >> "$LOG"
+SET OBSERVERCONFIGFILE=$OBSCONFIG
+SET MASTEROBSERVERHOSTS FOR $GROUP_NAME TO $MASTER
+EXIT;
+EOF
