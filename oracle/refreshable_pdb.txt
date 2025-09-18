@@ -1,0 +1,86 @@
+Refreshable PDB:
+
+On source:
+	1) Create user 
+
+create user c##remote_clone_user identified by 'oracle';
+grant create session, sysoper, create pluggable database to c##remote_clone_user container=all;
+alter user c##remote_clone_user identified by "oracle";
+
+SQL> show pdbs
+
+    CON_ID CON_NAME                       OPEN MODE  RESTRICTED
+---------- ------------------------------ ---------- ----------
+         2 PDB$SEED                       READ ONLY  NO
+         3 PDB                            READ WRITE NO
+
+
+
+On target:
+	2) Create database link
+
+Add TNS:
+CDB =
+  (DESCRIPTION =
+    (ADDRESS = (PROTOCOL = TCP)(HOST = pixel1)(PORT = 1521))
+    (CONNECT_DATA =
+      (SERVER = DEDICATED)
+      (SERVICE_NAME = CDB)
+    )
+  )
+
+CREATE DATABASE LINK clone_link CONNECT TO c##remote_clone_user IDENTIFIED BY oracle USING 'CDB';
+  
+
+	3) Create refreshable PDB
+
+## with manual refresh
+CREATE PLUGGABLE DATABASE PDB_COPY FROM pdb@clone_link REFRESH MODE MANUAL  STANDBYS=NONE;
+
+## with autorefresh
+CREATE PLUGGABLE DATABASE PSPDB_RO FROM PSPROD@psprod_clone_link REFRESH MODE EVERY 60 MINUTES;
+
+## manual refresh over job
+
+CREATE OR REPLACE PROCEDURE sys.psprod_refresh
+AS BEGIN
+EXECUTE IMMEDIATE 'ALTER PLUGGABLE DATABASE PSPDB_RO CLOSE IMMEDIATE';
+EXECUTE IMMEDIATE 'ALTER PLUGGABLE DATABASE PSPDB_RO REFRESH';
+EXECUTE IMMEDIATE 'ALTER PLUGGABLE DATABASE PSPDB_RO OPEN READ ONLY';
+END;
+/
+
+BEGIN
+DBMS_SCHEDULER.CREATE_JOB (
+job_name => 'PSPROD_REFRESH_JOB',
+job_type => 'STORED_PROCEDURE',
+job_action => 'sys.psprod_refresh',
+repeat_interval => 'freq=daily;byday=mon,tue,wed,thu,fri;BYHOUR=4; BYMINUTE=1',
+auto_drop => FALSE,
+enabled => TRUE,
+comments => 'Automatic refresh of the prod PDB clone');
+END;
+/
+
+	4) Manual refresh
+
+ALTER PLUGGABLE DATABASE PSPDB_ro CLOSE IMMEDIATE;
+ALTER PLUGGABLE DATABASE PSPDB_ro REFRESH;
+ALTER PLUGGABLE DATABASE PSPDB_ro OPEN READ ONLY;
+
+
+	5) Check last refresh time
+	
+SELECT last_refresh_scn,
+cast(scn_to_timestamp(last_refresh_scn) as date) refresh_Time
+FROM dba_pdbs WHERE pdb_name = 'PSPDB_RO' ;
+
+	6) Conver to non refreshable
+
+alter pluggable database PDB5NEW  refresh mode none;
+alter pluggable database MCLONE open;
+
+	7) Checks
+	
+SQL> col pdb_name for a15
+SQL> select PDB_NAME,REFRESH_MODE,REFRESH_INTERVAL,LAST_REFRESH_SCN from dba_pdbs where PDB_NAME='PDB_COPY';
