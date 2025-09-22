@@ -1,57 +1,131 @@
-[oracle@is-obs3t obs1]$ cat stop_obs1.sh
-#!/bin/bash
-# To set
-DBSERVICE=TSTDB1
-GROUP_NAME=OBS1
-CUR_HOST=$(hostname -f)
-CUR_HOST_SHORT=$(hostname -s)
-LOG="$GROUP_NAME"_"$CUR_HOST_SHORT"_service.log
+#!/usr/bin/env bash
+# Usage: ./oedg.sh DBNAME
 
+set -euo pipefail
 
-export ORACLE_HOME=/u01/app/oracle/client
-export PATH=$PATH:$ORACLE_HOME/bin
-export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:$ORACLE_HOME/lib:$ORACLE_HOME
-. /home/oracle/envobs1.sh
+if [ $# -ne 1 ]; then
+  echo "Usage: $0 DBNAME" >&2
+  exit 2
+fi
 
-# try to stop observer, whenever it's master or not
-printf '%s\n' "[Info] $(date +"%Y-%m-%d-%T") Trying to stop observer $CUR_HOST..." >> "$LOG"
-EXEC_OUT=$("$ORACLE_HOME/bin/dgmgrl" -echo /@"$DBSERVICE" <<EOF
-SET OBSERVERCONFIGFILE=$OBSCONFIG
-STOP OBSERVING $GROUP_NAME
-EXIT
+DBNAME="$1"
+
+# Look for env file in oracle home directory
+mapfile -t ENV_FILES < <(find "$HOME" -maxdepth 1 -type f -name 'env*' 2>/dev/null | sort)
+
+if [ ${#ENV_FILES[@]} -eq 0 ]; then
+  echo "No env* files found in $HOME. Please check the environemnt" >&2
+  exit 1
+fi
+
+# Extract OBSCONFIG path from an env* file without sourcing it
+extract_obsconfig() {
+  awk '
+    /^[[:space:]]*#/ {next}
+    {
+      if (match($0, /^[[:space:]]*(export[[:space:]]+)?OBSCONFIG[[:space:]]*=[[:space:]]*([^#]+)/, a)) {
+        val = a[2]
+        gsub(/^[[:space:]]+|[[:space:]]+$/, "", val)   # trim
+        if (val ~ /^".*"$/ || val ~ /^'\''.*'\''$/) { val = substr(val, 2, length(val)-2) }
+        print val
+        exit
+      }
+    }
+  ' "$1"
+}
+
+for envf in "${ENV_FILES[@]}"; do
+  obsfile="$(extract_obsconfig "$envf" || true)"
+  [ -n "${obsfile:-}" ] || continue
+  if [ ! -r "$obsfile" ]; then
+    echo "[WARN] OBSCONFIG not readable in $envf: $obsfile" >&2
+    continue
+  fi
+
+  if grep -qiF -- "$DBNAME" "$obsfile"; then
+    # Load environment from the matching env file
+    . "$envf"
+
+    # Force DBSERVICE = DBNAME
+    export DBSERVICE="$DBNAME"
+
+    # dgmgrl path from ORACLE_HOME set by the env file
+     DGMGRL_BIN="${ORACLE_HOME}/bin/dgmgrl"
+    if [ ! -x "$DGMGRL_BIN" ]; then
+      echo "[ERROR] dgmgrl not found at $DGMGRL_BIN" >&2
+      exit 4
+    fi
+
+    # Run dgmgrl and capture output
+    DGM_OUT="$("$DGMGRL_BIN" -echo "/@${DBSERVICE}" <<'EOF'
+show configuration
+show observer
 EOF
-)
-printf '%s\n' "$EXEC_OUT" >> "$LOG"
-sleep 10
-[oracle@is-obs3t obs1]$
-[oracle@is-obs3t obs1]$
-[oracle@is-obs3t obs1]$
-[oracle@is-obs3t obs1]$ cat start_obs1.sh
-#!/bin/bash
-DBSERVICE=TSTDB1
-GROUP_NAME=OBS1
-CUR_HOST=$(hostname -f)
-CUR_HOST_SHORT=$(hostname -s)
-MASTER=
-LOG="$GROUP_NAME"_"$CUR_HOST_SHORT"_service.log
+)"
+    PARSED="$(printf '%s\n' "$DGM_OUT" | awk '
+      BEGIN{
+        conf="UNKNOWN"; fsfo="Unknown"; conf_next=0; obs=0; obs_lines=""
+      }
+      {
+        # Fast-Start Failover: single line
+        if (match($0, /^Fast-Start[[:space:]]+Failover:[[:space:]]*(.*)$/, m)) { fsfo=m[1]; next }
 
-export ORACLE_HOME=/u01/app/oracle/client
-export PATH=$PATH:$ORACLE_HOME/bin
-export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:$ORACLE_HOME/lib:$ORACLE_HOME
-. /home/oracle/envobs1.sh
+        # Configuration Status
+        if (match($0, /^Configuration Status:[[:space:]]*(.*)$/, m)) {
+          val=m[1]; gsub(/^[[:space:]]+|[[:space:]]+$/,"",val)
+          if (val!="") { split(val,a,/[[:space:]]+/); conf=a[1]; conf_next=0 }
+          else { conf_next=1 }
+          next
+        }
+        if (conf_next) {
+          if ($0 ~ /\S/) { split($0,a,/[[:space:]]+/); conf=a[1]; conf_next=0 }
+          next
+        }
 
-printf '%s\n' "[Info] $(date +"%Y-%m-%d-%T") Starting observer "$CUR_HOST"" >> "$LOG"
+        # Observer block
+        if ($0 ~ /^Observer /) { obs=1 }
+        if (obs) {
+          if ($0 ~ /^DGMGRL>/) { obs=0; next }
+          obs_lines = obs_lines $0 "\n"
+        }
+      }
+      END{
+        gsub(/\n$/,"",obs_lines)
+        print "__CONF__" conf
+        print "__FSFO__" fsfo
+        print "__OBS__\n" obs_lines
+      }
+    ')"
 
-$ORACLE_HOME/bin/dgmgrl -echo /@$DBSERVICE <<EOF >> "$LOG"
-SET OBSERVERCONFIGFILE=$OBSCONFIG
-START OBSERVING $GROUP_NAME
-SHOW OBSERVERS
-EXIT;
-EOF
-sleep 10
-printf '%s\n' "[Info] $(date +"%Y-%m-%d-%T") Setting master observer to "$MASTER"" >> "$LOG"
-$ORACLE_HOME/bin/dgmgrl -echo /@$DBSERVICE <<EOF >> "$LOG"
-SET OBSERVERCONFIGFILE=$OBSCONFIG
-SET MASTEROBSERVERHOSTS FOR $GROUP_NAME TO $MASTER
-EXIT;
-EOF
+    CONF_STATUS="$(printf '%s\n' "$PARSED" | sed -n 's/^__CONF__//p' | head -n1)"
+    FSFO_LINE="$(printf '%s\n' "$PARSED" | sed -n 's/^__FSFO__//p' | head -n1)"
+    OBS_BLOCK="$(printf '%s\n' "$PARSED" | awk '/^__OBS__/{flag=1; next} flag{print}')"
+
+    max=0
+    for lbl in "Database unique name" "Configuration status" "Fast-Start failover"; do
+      len=${#lbl}
+      (( len > max )) && max=$len
+    done
+
+    echo ""
+    printf '%-*s: %s\n' $max "Database unique name" "$DBNAME"
+    printf '%-*s: %s\n' $max "Configuration status" "${CONF_STATUS:-UNKNOWN}"
+    printf '%-*s: %s\n' $max "Fast-Start failover" "${FSFO_LINE:-Unknown}"
+
+    echo "Observers:"
+    if [ -n "${OBS_BLOCK//[[:space:]]/}" ]; then
+      printf '%s\n' "$OBS_BLOCK"
+    else
+      echo "None"
+    fi
+
+    echo
+    echo "If you want to load this environment into your current shell, run:"
+    echo "  . \"$envf\""
+
+    exit 0
+  fi
+done
+
+echo "No OBSCONFIG matched DB name: $DBNAME in $HOME" >&2
+exit 3
