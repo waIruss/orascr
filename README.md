@@ -1,103 +1,351 @@
-#!/usr/bin/env bash
-# RAC PMON + HugePages + Semaphores + MemAvailable + ASM DATA free GB (via asmcmd on local node)
-# HugePage = 2 MB; memory values shown in GB (1 decimal)
+#!/bin/bash
 
-set -euo pipefail
+log="fsfo_config.log"
 
-# Discover nodes
-if [[ -z "${NODES:-}" ]]; then
-  if ! command -v olsnodes >/dev/null 2>&1; then
-    echo "[Error] olsnodes not found and \$NODES not set." >&2
-    exit 1
-  fi
-  mapfile -t nodes < <(olsnodes)
-else
-  # shellcheck disable=SC2206
-  nodes=(${NODES})
+# -------------------------
+# Validate TNS
+# -------------------------
+function validate_tns() {
+        local _tns="$1"
+        check_tns=$(tnsping "$_tns")
+
+        if [ $? -eq 0 ]; then
+                echo "[Info] TNS check passed for: $_tns"
+        return 0
+        else
+                if [[ $check_tns == *"TNS-03505"* ]]; then
+                        echo "[Error] Entry for this DB does not exists"
+                        return 1
+                else
+                        echo "[Error] TNS entry $_tns exists but check failed. Please validate tnsnames.ora"
+                        echo -e "\n$check_tns"
+                        exit 1
+                fi
+        fi
+
+}
+
+# -------------------------
+# Run dgmgrl
+# -------------------------
+
+run_dgmgrl() {
+
+    {
+        echo
+        echo "============================================================"
+        echo "[DGMGRL START] $(date '+%Y-%m-%d %H:%M:%S')  DB=$_db"
+        echo "============================================================"
+        echo
+    } | tee -a "$log" >/dev/null
+
+    {
+        cat
+        echo "EXIT;"
+    } | "$ORACLE_HOME/bin/dgmgrl" -echo /@"$_db" 2>&1 \
+      | tee -a "$log"
+
+    {
+        echo
+        echo "============================================================"
+        echo "[DGMGRL END]   $(date '+%Y-%m-%d %H:%M:%S')  DB=$_db"
+        echo "============================================================"
+        echo
+    } | tee -a "$log" >/dev/null
+}
+
+# -------------------------
+# Check connections
+# -------------------------
+function check_conn {
+        tmp_con=$(mktemp)
+        # check connections
+        for i in $_hh_db $_oe_db; do
+                #sqlplus -s /@$i as sysdg << EOF > "$tmp_con" 2>&1
+sqlplus -s /@$i as sysdba << EOF > "$tmp_con" 2>&1
+WHENEVER SQLERRROR EXIT SQL.SQLCODE
+select 1 from dual;
+exit;
+EOF
+
+                if [ $? -ne 0 ]; then
+                        echo "[Error] Connection to $i failed"
+                        # print errrors
+                        err_con=$(cat $tmp_con)
+                        echo -e "\033[2m$err_con\033[0m"
+                        rm -f "$tmp_con"
+                        exit 1
+                else
+                        echo "[Info] Connection to $i successful"
+                fi
+        done
+}
+
+# -------------------------
+# Configure FSFO
+# -------------------------
+function configure_fsfo() {
+_fsfo_cmds=$(cat <<EOF
+EDIT DATABASE $_hh_db SET PROPERTY LogXptMode='FASTSYNC';
+EDIT DATABASE $_oe_db SET PROPERTY LogXptMode='FASTSYNC';
+
+EDIT DATABASE $_hh_db SET PROPERTY FastStartFailoverTarget='$__db';
+EDIT DATABASE $_oe_db SET PROPERTY FastStartFailoverTarget='$_hh_db';
+
+--EDIT DATABASE $_hh_db SET PROPERTY PreferredObserverHosts='...${_env_lc}...:1,...${_env_lc}...:2';
+--EDIT DATABASE $_oe_db SET PROPERTY PreferredObserverHosts='...${_env_lc}....:1,...${_env_lc}...:2';
+
+EDIT CONFIGURATION SET PROPERTY ObserverReconnect=15;
+EDIT CONFIGURATION SET PROTECTION MODE AS MaxAvailability;
+
+ENABLE FAST_START FAILOVER;
+
+EDIT DATABASE $_hh_db SET PROPERTY DGConnectIdentifier='$_hh_db';
+EDIT DATABASE $_oe_db SET PROPERTY DGConnectIdentifier='$_oe_db';
+EOF
+)
+
+        echo "[Info] Configuring FSFO for $_db ($_hh_db / $_oe_db, env=$_env)"
+
+_fsfo_output="$(
+    run_dgmgrl <<EOF
+$_fsfo_cmds
+EOF
+)"
+
+# Basic error scan
+        if echo "$_fsfo_output" | grep -E 'ORA-[0-9]{5}|DGM-[0-9]{5}|SP2-[0-9]{4}|ERROR ' >/dev/null; then
+            echo "[Error] DGMGRL reported errors during FSFO configuration for $_db."
+            echo "-------- BEGIN DGMGRL OUTPUT --------"
+            echo "$_fsfo_output"
+            echo "--------- END DGMGRL OUTPUT ---------"
+            exit 1
+        fi
+
+echo "[Info] FSFO configuration commands executed without detected ORA-/DGM-/SP2-/ERROR."
+}
+
+# -------------------------
+# Mode CONFIG
+# -------------------------
+function config() {
+
+        echo ""
+        echo "[Info] Creating config for $_db (env: $_env)"
+
+        ## look for current env
+        if [[ $_env == "..." ]];then
+                file=$(ls ~/ | grep -i "..." |sort -V | tail -n1)
+                echo "[Info] Current env file: "$file
+        elif [[ $_env == "." ]]; then
+                file=$(ls ~/ | grep -iE "^.[0-9]+\.sh$" |sort -V | tail -n1)
+                echo "[Info] Current env file: "$file
+        elif [[ $_env == "." ]]; then
+                file=$(ls ~/ | grep -iE "^.[0-9]+\.sh$" |sort -V | tail -n1)
+                echo "[Info] Current env file: "$file
+        elif [[ $_env == "." ]]; then
+                file=$(ls ~/ | grep -iE "^.[0-9]+\.sh$" |sort -V | tail -n1)
+                echo "[Info] Current env file: "$file
+        fi
+
+        ## check if file exists
+        if [[ -z "${file:-}" ]]; then
+            echo "[ERROR]: Environment file does not exists. Please check environment."
+            exit 1
+        fi
+
+        ## source env
+        source "$HOME/$file"
+        echo "[Info] Current TNS location: $TNS_ADMIN"
+        #_hh_db="${_db::-1}h"
+        #_oe_db="${_db::-1}o"
+        _hh_db="${_db::-1}1"
+        _oe_db="${_db::-1}2"
+
+        #xtract lifecuce
+        _env_lc="${_hh_db: -3:1}"
+#       case "$_env_lc" in
+#               d|p|s)
+#               ;;
+#               t)
+#               _env_lc="d"
+#               ;;
+#               *)
+
+       case "$_env_lc" in
+               p|s)
+               ;;
+               t)
+               _env_lc="d"
+                ;;
+               d)
+               _env_lc="t"
+               ;;
+               *)
+
+        echo "[Error] Invalid or nor supported value for environment: $_env_lc"
+        exit 1
+        ;;
+        esac
+
+        echo "[Info] . DB Name: $_hh_db"
+        echo "[Info] . DB Name: $_oe_db"
+
+
+        declare -A tns_results
+
+        # validate TNS
+        for i in $_hh_db $_oe_db; do
+                echo "[Info] Validating TNS entry for $i..."
+                validate_tns "$i"
+                tns_results["$i"]=$?
+        done
+
+        # if both are ok
+        if [[ ${tns_results[$_hh_db]} -eq 0 && ${tns_results[$_oe_db]} -eq 0 ]]; then
+                echo "[Info] TNS checked passed for both DB. Contiuning"
+        else
+                echo "[Error] TNS checked for at least one DB."
+        fi
+
+        check_conn
+
+        # check if FSFO not already configured
+
+dg_output="$(run_dgmgrl <<EOF
+show fast_start failover;
+EOF
+)"
+
+# temp disable
+#       if echo "$dg_output" | grep -q "Fast-Start Failover: Enabled"; then
+#               echo "[ERROR]: Fast-Start Failover is already enabled"
+#               exit 1
+#       fi
+
+        echo "[Info] Fast-Start Failover is not enabled, continuing..."
+
+        configure_fsfo
+}
+
+# -------------------------
+# Mode DECONFIG
+# -------------------------
+#function deconfig() {
+#    echo "Undoing step A"
+#    echo "Undoing step B"
+#}
+
+
+# -------------------------
+# Help
+# -------------------------
+function show_help() {
+cat <<EOF
+Usage:
+  $0 --config --env <ENV> --dbname <DB_NAME>
+  $0 --deconfig --dbname <DB_NAME>
+
+Options:
+  --config            Create configuration
+  --deconfig          Remove configuration
+  --env <env>         Environment (required with --config)
+                      Allowed: . | . | . | .
+  --dbname <name>     Database name (required)
+  --help              Show this help
+
+Examples:
+  $0 --config --env . --dbname b1234d1h
+  $0 --deconfig --dbname b1234d1h
+EOF
+}
+
+# -------------------------
+# Argument parsing
+# -------------------------
+_mode=""
+_db=""
+_env=""
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --config)
+            _mode="config"
+            shift
+            ;;
+        --deconfig)
+            _mode="deconfig"
+            shift
+            ;;
+        --dbname)
+            if [[ -z "${2-}" || "$2" == -* ]]; then
+                echo "ERROR: --dbname requires a value"
+                show_help
+                exit 1
+            fi
+            _db="$2"
+            shift 2
+            ;;
+        --env)
+            if [[ -z "${2-}" || "$2" == -* ]]; then
+                echo "ERROR: -env requires a value (.|.|.|.)"
+                show_help
+                exit 1
+            fi
+            _env="$2"
+            shift 2
+            ;;
+        --help|-h)
+            show_help
+            exit 0
+            ;;
+        *)
+            echo "ERROR: Unknown option $1"
+            show_help
+            exit 1
+            ;;
+    esac
+done
+
+[[ -z "$_mode" ]] && { echo "ERROR: --config or --deconfig required"; show_help; exit 1; }
+[[ -z "$_db"   ]] && { echo "ERROR: --dbname required"; show_help; exit 1; }
+
+# validate env
+if [[ "$_mode" == "config" ]]; then
+    if [[ -z "$_env" ]]; then
+        echo "ERROR: -env is required when using --config"
+        show_help
+        exit 1
+    fi
+
+    case "$_env" in
+        |||)
+            ;;
+        *)
+            echo "ERROR: Invalid -env value '$_env'. Allowed: , , , "
+            show_help
+            exit 1
+            ;;
+    esac
 fi
 
-local_node=$(hostname -s | tr '[:upper:]' '[:lower:]')
-SSH_USER="${SSH_USER:-$(id -un)}"
-SSH_OPTS=(-o BatchMode=yes -o ConnectTimeout=5 -o StrictHostKeyChecking=no)
+if [[ "$_mode" == "config" ]]; then
+    _host_short="$(hostname -s)"
+    case "$_host_short" in
+        is-|is-|is-)
+            ;;
+        *)
+            echo "[Error] CONFIG mode can only be executed on is-, is-, or is-."
+            echo "[Error] Current host: $_host_short"
+            exit 1
+            ;;
+    esac
+fi
 
-printf "%-15s %-15s %-18s %-17s %-9s %-12s %-10s\n" \
-  "Node" "Instance_Count" "HugePages_Free_GB" "Sem_Used/Total" "Used_%" "MemAvail_GB" "ASM_DATA_GB"
-printf "%-15s %-15s %-18s %-17s %-9s %-12s %-10s\n" \
-  "---------------" "---------------" "------------------" "-----------------" "---------" "------------" "-----------"
+"$_mode"
 
-for node in "${nodes[@]}"; do
-  node_lc=$(echo "$node" | tr '[:upper:]' '[:lower:]')
 
-  # DB instance count (exclude ASM)
-  inst_count=$(ssh "${SSH_OPTS[@]}" "${SSH_USER}@${node}" \
-    "ps -ef | grep pmon | grep -vi asm | grep -v grep | wc -l" 2>/dev/null || echo "N/A")
+exit 1
 
-  # HugePages_Free -> GB (2 MB per page)
-  hp_free_pages=$(ssh "${SSH_OPTS[@]}" "${SSH_USER}@${node}" \
-    "grep -E '^HugePages_Free:' /proc/meminfo | awk '{print \$2}'" 2>/dev/null || echo "N/A")
-  if [[ "$hp_free_pages" =~ ^[0-9]+$ ]]; then
-    hp_free_gb=$(awk -v pages="$hp_free_pages" 'BEGIN{printf "%.1f", pages * 2 / 1024}')
-  else
-    hp_free_gb="N/A"
-  fi
+-------------
 
-  # Semaphore total (SEMMNS)
-  sem_total=$(ssh "${SSH_OPTS[@]}" "${SSH_USER}@${node}" \
-    "awk '{print \$2}' /proc/sys/kernel/sem 2>/dev/null" 2>/dev/null || echo "")
-  [[ -z "$sem_total" ]] && sem_total="N/A"
-
-  # Semaphore used (sum of nsems)
-  sem_used=$(ssh "${SSH_OPTS[@]}" "${SSH_USER}@${node}" \
-    "if [[ -r /proc/sysvipc/sem ]]; then
-       awk 'NR==1{for(i=1;i<=NF;i++) if (\$i==\"nsems\") col=i; next} {sum+=(\$col? \$col:0)} END{print (sum==\"\"?0:sum)}' /proc/sysvipc/sem
-     else
-       echo 0
-     fi" 2>/dev/null || echo "N/A")
-
-  if [[ "$sem_used" =~ ^[0-9]+$ ]] && [[ "$sem_total" =~ ^[0-9]+$ ]] && [[ "$sem_total" -gt 0 ]]; then
-    sem_pct=$(awk -v u="$sem_used" -v t="$sem_total" 'BEGIN{printf "%.1f", (u/t)*100}')
-    sem_pair="${sem_used}/${sem_total}"
-  else
-    sem_pct="N/A"
-    sem_pair="${sem_used}/${sem_total}"
-  fi
-
-  # MemAvailable -> GB
-  mem_avail_gb=$(ssh "${SSH_OPTS[@]}" "${SSH_USER}@${node}" \
-    "grep -E '^MemAvailable:' /proc/meminfo | awk '{printf \"%.1f\", \$2/1048576}'" 2>/dev/null || echo "N/A")
-
-  # ASM DATA free (local only)
-  if [[ "$node_lc" == "$local_node" ]]; then
-    if command -v asmcmd >/dev/null 2>&1; then
-      asm_sid=$(ps -ef | grep -E 'pmon_.*\+asm' -i | awk -F_ '/pmon_/ {print $3; exit}')
-      if [[ -n "${asm_sid:-}" ]]; then
-        ORACLE_SID="$asm_sid" \
-        asm_data_gb=$(asmcmd -p lsdg 2>/dev/null | \
-          awk '
-            BEGIN{IGNORECASE=1}
-            NR==1{
-              for(i=1;i<=NF;i++){
-                if($i ~ /^Free_MB$/){freeIdx=i}
-                if($i ~ /^Name$/){nameIdx=i}
-              }
-            }
-            NR>1 && freeIdx>0 && nameIdx>0 {
-              name=$nameIdx; gsub(/\/$/,"",name)
-              if (name ~ /DATA/) sum+=$freeIdx
-            }
-            END{
-              if(sum=="") print "N/A"; else printf "%.1f", sum/1024
-            }')
-      else
-        asm_data_gb="N/A"
-      fi
-    else
-      asm_data_gb="N/A"
-    fi
-  else
-    asm_data_gb="N/A"
-  fi
-
-  printf "%-15s %-15s %-18s %-17s %-9s %-12s %-10s\n" \
-    "$node" "$inst_count" "$hp_free_gb" "$sem_pair" "$sem_pct" "$mem_avail_gb" "$asm_data_gb"
-done
