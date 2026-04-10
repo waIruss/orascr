@@ -1,66 +1,73 @@
 #!/bin/bash
 
-# Calculate the cutoff date (6 months ago)
 CUTOFF_DATE=$(date -d "6 months ago" +%Y-%m-%d)
 
 echo "Scanning for failovers on or after: $CUTOFF_DATE"
-echo "Filtering out databases with only 1 occurrence..."
+echo "Filtering: 3-min deduplication & databases with >1 occurrence..."
 echo "----------------------------------------------------"
 
-# Group both find commands in parentheses to combine their output into one stream.
-# We use 'cat' for uncompressed logs and 'zcat' for compressed logs.
+# Combine both log types into a single stream
 (
   find /app/oracle -type f -path "*/observer*/*.log" -exec cat {} + 2>/dev/null
   find /app/oracle -type f -path "*/observer*/log_archive/*.gz" -exec zcat {} + 2>/dev/null
-) | awk -v cutoff="$CUTOFF_DATE" '
-
-# 1. Match Date
+) | \
+awk -v cutoff="$CUTOFF_DATE" '
+# STAGE 1: FLATTEN MULTILINE LOGS
 /^[0-9]{4}-[0-9]{2}-[0-9]{2}T/ {
     date_str = substr($0, 1, 19)
 }
-
-# 2. Match Database Name
 /Initiating Fast-Start Failover to database/ {
     split($0, arr, "\"")
     raw_db = arr[2]
-    
-    # Cut off the last character of the DB name (e.g., tstdb1 -> tstdb)
     db_name = substr(raw_db, 1, length(raw_db) - 1)
 }
-
-# 3. Match Trigger Line
 /Performing failover NOW, please wait.../ {
     if (date_str != "" && db_name != "" && date_str >= cutoff) {
-        
-        # Save the fully formatted line into memory (indexed by event_count)
-        event_count++
-        event_lines[event_count] = date_str "; " db_name "; \"Performing failover NOW, please wait...\""
-        
-        # Tally the occurrences of this specific trimmed DB name
-        db_occurrences[db_name]++
-        
-        # Clear variables for the next block
+        printf "%s; %s; \"Performing failover NOW, please wait...\"\n", date_str, db_name
         date_str = ""
         db_name = ""
     }
-}
+}' | \
+sort | \
+awk '
+# STAGE 2 & 3: DEDUPLICATE (3-MIN) AND COUNT
+{
+    # Extract the timestamp and DB name from the newly flattened line
+    split($0, parts, "; ")
+    date_str = parts[1]
+    db_name = parts[2]
 
-# 4. After scanning ALL files, process the saved data
-END {
-    # Loop through all the events we saved in memory
-    for (i = 1; i <= event_count; i++) {
+    # Convert the ISO timestamp into Epoch seconds so we can do math on it
+    # We replace dashes and the "T" with spaces to feed it into mktime()
+    time_spec = date_str
+    gsub(/[-T:]/, " ", time_spec)
+    epoch = mktime(time_spec)
+
+    # Check if this DB was seen less than 180 seconds (3 mins) ago
+    if (epoch - last_seen[db_name] >= 180) {
         
-        # Extract the db_name from the saved string to check its tally
+        # Update the last_seen time for this specific DB
+        last_seen[db_name] = epoch
+        
+        # Save the valid event into memory
+        event_count++
+        event_lines[event_count] = $0
+        
+        # Tally the valid occurrences
+        db_occurrences[db_name]++
+    }
+}
+END {
+    # Print only events belonging to a DB that failed over more than once
+    for (i = 1; i <= event_count; i++) {
         split(event_lines[i], parts, "; ")
         check_db = parts[2]
         
-        # If this DB occurred more than once across all logs, print the line
         if (db_occurrences[check_db] > 1) {
             print event_lines[i]
         }
     }
-}
-'
+}'
 
 echo "----------------------------------------------------"
 echo "Scan complete."
