@@ -1,3 +1,13 @@
+
+
+
+
+
+
+
+
+
+
 status_observer() {
   prepare_env "$env"
 
