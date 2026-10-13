@@ -1,179 +1,267 @@
--- =====================================================================
--- Automatic Transaction Rollback (Priority Transactions) - test script
--- Target  : Oracle 23ai / 26ai Enterprise Edition
--- Needs   : test schema + ALTER SYSTEM at PDB level (or a DBA to set the
---           system parameters once)
--- Sessions: THREE separate connections are required
---             S0 = admin (parameters, monitoring)
---             S1 = blocker
---             S2 = waiter
---           SQL Developer: open S1/S2 as UNSHARED worksheets
---           (Ctrl+Shift+N). A shared worksheet runs everything in one
---           session and no lock conflict will ever occur.
---           SQL*Plus / SQLcl in separate terminals is the safest option.
---
--- Test cases
---   TC1  LOW blocker vs HIGH waiter, ROLLBACK mode   - core behaviour
---   TC2  HIGH blocker vs HIGH waiter                 - negative test
---   TC3  TRACK mode                                  - safe rollout path
---   TC4  Forgotten ad-hoc session, multi-row         - real-world case
--- =====================================================================
+---
+# Oracle health check: run every SQL*Plus script in scripts_dir, unchanged, against
+# each database in the inventory, and store the output on this server:
+#
+#   <output_base>/pdbs/<PDB>/<YYYY-MM-DD_HHMMSS>/
+#       01_sessions.log, 02_tablespaces.log, ...   raw SQL*Plus output, one per script
+#       report.html                                 summary + every log, in one page
+#       summary.json                                machine-readable status per script
+#   <output_base>/pdbs/<PDB>/latest -> <newest run>
+#
+# Locally:   ./run.sh                     (see README)
+# Pipeline:  ansible-playbook healthcheck.yml -e ora_password=... -e run_id=...
+#
+# Each script gets its own sqlplus session: an error or hang affects one script only,
+# and `timeout` kills a stuck script without touching the rest.
+# Every task that sees the password is no_log; later tasks only read sanitized facts.
 
--- =====================================================================
--- S0 : Preconditions
--- =====================================================================
-select banner_full from v$version;
+- name: Oracle health check
+  hosts: oracle_db
+  gather_facts: false
 
-select name, value, isdefault, ispdb_modifiable, issys_modifiable
-from   v$parameter
-where  name in ('txn_priority',
-                'priority_txns_mode',
-                'priority_txns_high_wait_target',
-                'priority_txns_medium_wait_target');
--- Record defaults and whether the parameters can be set inside a PDB.
--- If ISPDB_MODIFIABLE = FALSE or a lockdown profile blocks ALTER SYSTEM,
--- note it - it decides whether DBaaS tenants can use the feature at all.
+  vars:
+    # Play-internal values only. Tunables: group_vars/oracle_db/main.yml;
+    # sqlplus_bin, sqlplus_env, connect_id: group_vars/oracle_db/derived.yml.
+    marker: "###HEALTHCHECK_OUTPUT_STARTS###"
+    file_mode: "{{ '0640' if output_group else '0600' }}"
+    dir_mode: "{{ '2750' if output_group else '0700' }}"
+    safe_run_id: "{{ run_id | regex_replace('[^A-Za-z0-9._-]', '') }}"
 
--- Baseline counters
-select name, value from v$sysstat
-where  name like 'txns rollback%' or name like 'txns track mode%'
-order  by name;
+  tasks:
+    # ------------------------------------------------------------------ inputs
+    - name: Freeze run timestamp (same folder name for every database in this run)
+      run_once: true
+      ansible.builtin.set_fact:
+        run_ts: "{{ run_ts | default(now(fmt=run_ts_format)) }}"
 
--- =====================================================================
--- S0 : Setup
--- =====================================================================
-drop table atr_accounts purge;
-create table atr_accounts (
-  acc_id   number primary key,
-  balance  number(12,2) not null,
-  upd_by   varchar2(30)
-);
-insert into atr_accounts select level, 1000, null from dual connect by level <= 10;
-commit;
+    - name: Find scripts
+      run_once: true
+      ansible.builtin.find:
+        paths: "{{ scripts_dir }}"
+        patterns: "{{ scripts_patterns }}"
+        excludes: "{{ scripts_excludes }}"
+        file_type: file
+      register: found
 
--- Short target so the test runs in seconds
-alter system set priority_txns_mode             = 'ROLLBACK' scope=memory;
-alter system set priority_txns_high_wait_target = 10         scope=memory;
+    - name: Check there is something to run
+      run_once: true
+      ansible.builtin.assert:
+        that: found.files | length > 0
+        fail_msg: "no scripts matching {{ scripts_patterns }} in {{ scripts_dir }}"
+        quiet: true
 
--- =====================================================================
--- TC1 - LOW blocker, HIGH waiter, ROLLBACK mode
--- Expected: after ~10 s S1's transaction is rolled back, S2 proceeds,
---           S1's session stays connected and gets ORA-63300
--- =====================================================================
--- S1:
-alter session set txn_priority = LOW;
-update atr_accounts set balance = balance - 100, upd_by = 'S1_LOW' where acc_id = 1;
--- leave uncommitted
+    - name: Fix script order (file name)
+      run_once: true
+      ansible.builtin.set_fact:
+        scripts: "{{ found.files | map(attribute='path') | sort }}"
 
--- S0: confirm priority is recorded on the transaction
-select s.sid, s.username, t.txn_priority, t.priority_txns_wait_target
-from   v$transaction t join v$session s on s.taddr = t.addr;
+    - name: Check connection settings
+      ansible.builtin.assert:
+        that:
+          - dsn is defined and dsn | length > 0
+          - ora_password is defined
+        fail_msg: >-
+          {{ inventory_hostname }}: needs dsn in inventory.yml and a password
+          (credentials file entry or -e ora_password)
+        quiet: true
 
--- S2:
-alter session set txn_priority = HIGH;
-set timing on
-update atr_accounts set balance = balance + 100, upd_by = 'S2_HIGH' where acc_id = 1;
--- EXPECTED: hangs ~10 s, then "1 row updated"
+    # -------------------------------------------------------------- connection
+    - name: Test connection
+      ansible.builtin.command:
+        cmd: "timeout {{ connect_timeout }} {{ sqlplus_bin }} -S -L /nolog"
+        stdin: |
+          WHENEVER SQLERROR EXIT FAILURE
+          SET HEADING OFF FEEDBACK OFF PAGESIZE 0 LINESIZE 400 TRIMOUT ON
+          CONNECT {{ ora_user }}/"{{ ora_password }}"@{{ connect_id }}
+          SELECT 'CONNECT_OK|' || sys_context('USERENV','CON_NAME')
+                 || '|' || sys_context('USERENV','DB_NAME')
+                 || '|' || sys_context('USERENV','DATABASE_ROLE') FROM dual;
+          EXIT
+      environment: "{{ sqlplus_env }}"
+      register: conn
+      changed_when: false
+      failed_when: false
+      no_log: true
 
--- S0: while S2 waits (inside the 10 s window)
-select sid, blocking_session, event, seconds_in_wait
-from   v$session where blocking_session is not null;
+    - name: Record connection result
+      ansible.builtin.set_fact:
+        conn_ok: "{{ ok_line | length > 0 }}"
+        db_info: >-
+          {{ dict(['con_name', 'db_name', 'database_role'] | zip(ok_line.split('|')[1:]))
+             if ok_line else {} }}
+        conn_error: >-
+          {{ '' if ok_line else
+             (conn.stdout_lines | select('match', '(ORA|SP2|TNS)-[0-9]+') | first
+              | default('timed out after ' ~ connect_timeout ~ ' s' if conn.rc == 124
+                        else 'sqlplus rc=' ~ conn.rc ~ ' ' ~ (conn.stderr | trim))) }}
+      vars:
+        ok_line: "{{ conn.stdout_lines | select('match', 'CONNECT_OK[|]') | first | default('') }}"
 
--- S2:
-commit;
+    - name: Prepare run folder
+      ansible.builtin.set_fact:
+        pdb_folder: "{{ (pdb_name | default(db_info.con_name | default(inventory_hostname | upper)))
+                        | regex_replace('[^A-Za-z0-9_.-]', '_') }}"
 
--- S1: any next statement
-select count(*) from atr_accounts;
--- EXPECTED: ORA-63300 - transaction was automatically rolled back
-rollback;                             -- acknowledge; mandatory
-select count(*) from atr_accounts;    -- works again, same session
+    - name: Create run folder
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        mode: "{{ dir_mode }}"
+        group: "{{ output_group or omit }}"
+      loop:
+        - "{{ output_base }}/pdbs"
+        - "{{ output_base }}/pdbs/{{ pdb_folder }}"
+        - "{{ output_base }}/pdbs/{{ pdb_folder }}/{{ run_ts }}"
 
--- S0: verify
-select acc_id, balance, upd_by from atr_accounts where acc_id = 1;
--- EXPECTED: balance 1100, upd_by S2_HIGH  (S1's -100 is gone)
-select name, value from v$sysstat where name like 'txns rollback%';
--- EXPECTED: 'txns rollback priority_txns_high_wait_target' +1
+    - name: Remember run folder
+      ansible.builtin.set_fact:
+        run_dir: "{{ output_base }}/pdbs/{{ pdb_folder }}/{{ run_ts }}"
 
--- =====================================================================
--- TC2 - HIGH blocker, HIGH waiter   (negative test)
--- Expected: classic lock wait, blocker never rolled back
--- =====================================================================
--- S1:
-alter session set txn_priority = HIGH;
-update atr_accounts set upd_by = 'S1_HIGH' where acc_id = 3;
--- S2:
-alter session set txn_priority = HIGH;
-update atr_accounts set upd_by = 'S2_HIGH' where acc_id = 3;
--- EXPECTED: waits indefinitely (enq: TX - row lock contention)
+    # ----------------------------------------------------------------- scripts
+    # Scripts run unchanged: no SET/WHENEVER imposed on them (SQL*Plus defaults apply).
+    # cwd = run folder, so a SPOOL inside a script lands next to the logs;
+    # @@ includes still resolve relative to the script's own directory.
+    # The preamble's own output is cut off at the marker.
+    - name: Run scripts
+      ansible.builtin.command:
+        cmd: "timeout {{ script_timeout }} {{ sqlplus_bin }} -S -L /nolog"
+        chdir: "{{ run_dir }}"
+        stdin: |
+          SET FEEDBACK OFF
+          CONNECT {{ ora_user }}/"{{ ora_password }}"@{{ connect_id }}
+          {% if read_only_session %}SET TRANSACTION READ ONLY;{% endif %}
 
--- S0: after > 30 s (3x target)
-select name, value from v$sysstat where name like 'txns rollback%';
--- EXPECTED: no change since TC1
+          EXEC DBMS_APPLICATION_INFO.SET_MODULE('ansible-healthcheck', '{{ (item | basename)[:32] }}')
+          EXEC DBMS_SESSION.SET_IDENTIFIER('{{ safe_run_id }}')
+          SET FEEDBACK 6
+          PROMPT {{ marker }}
+          @"{{ item }}"
+          EXIT
+      environment: "{{ sqlplus_env }}"
+      loop: "{{ scripts }}"
+      loop_control: { label: "{{ item | basename }}" }
+      register: runs
+      when: conn_ok
+      changed_when: false
+      failed_when: false
+      no_log: true
 
--- Release:
--- S1: commit;
--- S2: commit;   -- S2's update completes only after S1 commits
+    # Errors are recognised the way SQL*Plus reports them: an ORA- line right after
+    # "ERROR..." or any SP2- line. ORA- text that is *data* (e.g. an alert log check
+    # listing ORA-00600) does not count.
+    - name: Classify script results
+      ansible.builtin.set_fact:
+        results: >-
+          {%- set out = [] -%}
+          {%- for r in runs.results | default([]) if conn_ok -%}
+          {%-   set raw = r.stdout | default('') -%}
+          {%-   set log = (raw.split(marker, 1)[1] | regex_replace('^\n', '')) if marker in raw else raw -%}
+          {%-   set lines = log.splitlines() -%}
+          {%-   set errs = [] -%}
+          {%-   for l in lines -%}
+          {%-     if l is match('SP2-[0-9]+') or (l is match('ORA-[0-9]+') and loop.index0 > 0
+                                                  and lines[loop.index0 - 1] is match('ERROR')) -%}
+          {%-       set _ = errs.append(l | trim) -%}
+          {%-     endif -%}
+          {%-   endfor -%}
+          {%-   set status = 'TIMEOUT' if r.rc == 124 else ('FAILED' if r.rc != 0 else ('ERRORS' if errs else 'OK')) -%}
+          {%-   set name = r.item | basename -%}
+          {%-   set _ = out.append({
+                  'script': name,
+                  'log': name | regex_replace('\.sql$', '') ~ '.log',
+                  'status': status,
+                  'rc': r.rc,
+                  'start': r.start | default(''),
+                  'seconds': ((r.end | to_datetime('%Y-%m-%d %H:%M:%S.%f')) - (r.start | to_datetime('%Y-%m-%d %H:%M:%S.%f'))).total_seconds() | round(1) if r.end is defined else 0,
+                  'errors': errs[:10],
+                  'output': log ~ (('\n' ~ r.stderr) if r.stderr | default('') else '')}) -%}
+          {%- endfor -%}
+          {{ out }}
 
--- =====================================================================
--- TC3 - TRACK mode (measure without acting)
--- Expected: no rollback, track counter increments
--- =====================================================================
--- S0:
-alter system set priority_txns_mode = 'TRACK' scope=memory;
--- S1:
-alter session set txn_priority = LOW;
-update atr_accounts set upd_by = 'S1_LOW' where acc_id = 5;
--- S2:
-alter session set txn_priority = HIGH;
-update atr_accounts set upd_by = 'S2_HIGH' where acc_id = 5;
--- EXPECTED: still waiting past the 10 s target
+    # ------------------------------------------------------------------ output
+    - name: Write one log per script
+      ansible.builtin.copy:
+        content: "{{ item.output ~ '\n' }}"     # command output loses its final newline
+        dest: "{{ run_dir }}/{{ item.log }}"
+        mode: "{{ file_mode }}"
+        group: "{{ output_group or omit }}"
+      loop: "{{ results }}"
+      loop_control: { label: "{{ item.log }}" }
 
--- S0: after ~15 s
-select name, value from v$sysstat
-where  name like 'txns track mode%' or name like 'txns rollback%';
--- EXPECTED: 'txns track mode priority_txns_high_wait_target' +1
---           'txns rollback ...' unchanged
+    - name: Write summary.json
+      ansible.builtin.copy:
+        content: >-
+          {{ {
+               'target': inventory_hostname, 'dsn': dsn | regex_replace('\s+', ''), 'user': ora_user,
+               'pdb_folder': pdb_folder, 'db': db_info, 'run_ts': run_ts, 'run_id': run_id,
+               'connected': conn_ok, 'connection_error': conn_error,
+               'scripts': results | map('dict2items') | map('rejectattr', 'key', 'equalto', 'output')
+                                  | map('items2dict') | list
+             } | to_nice_json }}
+        dest: "{{ run_dir }}/summary.json"
+        mode: "{{ file_mode }}"
+        group: "{{ output_group or omit }}"
 
--- Release:
--- S1: commit;
--- S2: commit;
--- S0:
-alter system set priority_txns_mode = 'ROLLBACK' scope=memory;
+    - name: Write report.html
+      ansible.builtin.template:
+        src: report.html.j2
+        dest: "{{ run_dir }}/report.html"
+        mode: "{{ file_mode }}"
+        group: "{{ output_group or omit }}"
 
--- =====================================================================
--- TC4 - Forgotten ad-hoc session (real-world pattern)
--- Developer session (LOW) changes several rows and goes idle;
--- application session at DEFAULT priority must finish.
--- Expected: the WHOLE blocker transaction is undone, not just the
---           contended row
--- =====================================================================
--- S1 (simulates SQL Developer left open):
-alter session set txn_priority = LOW;
-update atr_accounts set balance = 0 where acc_id between 6 and 10;
--- (no commit, idle)
+    # Files a script SPOOLs itself are created with the user's umask; align them.
+    - name: Find files created by scripts
+      ansible.builtin.find:
+        paths: "{{ run_dir }}"
+      register: run_files
 
--- S2 (application - no ALTER SESSION, default priority = HIGH):
--- reconnect S2 first, or: alter session set txn_priority = HIGH;
-update atr_accounts set balance = balance + 1 where acc_id = 8;
--- EXPECTED: proceeds after ~10 s
-commit;
+    - name: Apply output permissions to everything in the run folder
+      ansible.builtin.file:
+        path: "{{ item.path }}"
+        mode: "{{ file_mode }}"
+        group: "{{ output_group or omit }}"
+      loop: "{{ run_files.files }}"
+      loop_control: { label: "{{ item.path | basename }}" }
 
--- S0:
-select acc_id, balance from atr_accounts where acc_id between 6 and 10 order by 1;
--- EXPECTED: 1000, 1000, 1001, 1000, 1000
+    - name: Point latest at this run
+      ansible.builtin.file:
+        src: "{{ run_ts }}"
+        dest: "{{ output_base }}/pdbs/{{ pdb_folder }}/latest"
+        state: link
+        force: true
 
--- S1:
-rollback;   -- acknowledge ORA-63300
+    - name: Find old runs
+      ansible.builtin.find:
+        paths: "{{ output_base }}/pdbs/{{ pdb_folder }}"
+        file_type: directory
+        age: "{{ keep_days }}d"
+      register: old_runs
+      when: keep_days | int > 0
 
--- Deployment note (not a test): ad-hoc users can be classified LOW
--- without app change via an AFTER LOGON trigger:
---   if sys_context('USERENV','SESSION_USER') in ('ADHOC_USER') then
---     execute immediate 'alter session set txn_priority = LOW';
---   end if;
+    - name: Delete old runs
+      ansible.builtin.file:
+        path: "{{ item.path }}"
+        state: absent
+      loop: "{{ old_runs.files | default([]) | rejectattr('path', 'equalto', run_dir) | list }}"
+      loop_control: { label: "{{ item.path | basename }}" }
+      when: keep_days | int > 0
 
--- =====================================================================
--- S0 : Cleanup
--- =====================================================================
-alter system reset priority_txns_high_wait_target scope=memory;
-alter system reset priority_txns_mode             scope=memory;
-drop table atr_accounts purge;
+    # ----------------------------------------------------------------- verdict
+    - name: Result
+      ansible.builtin.debug:
+        msg: >-
+          {{ [run_dir ~ '/report.html']
+             + ([('CONNECT FAILED: ' ~ conn_error)] if not conn_ok else
+                results | map(attribute='status') | zip(results | map(attribute='script'))
+                        | map('join', '  ') | list) }}
+
+    - name: Fail if the connection failed or a script ended in {{ fail_on | join('/') }}
+      ansible.builtin.assert:
+        that:
+          - conn_ok
+          - results | selectattr('status', 'in', fail_on) | list | length == 0
+        fail_msg: >-
+          {{ ('connection failed: ' ~ conn_error) if not conn_ok else
+             (results | selectattr('status', 'in', fail_on)
+                      | map(attribute='script') | join(', ')) ~ ' - see ' ~ run_dir ~ '/report.html' }}
+        quiet: true
