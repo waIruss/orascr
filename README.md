@@ -1,88 +1,227 @@
-Real-Time SQL Plan Management — feature evaluation
-
-Feature: Real-Time SQL Plan Management (real-time SPM) Introduced: Oracle Database 23ai, carried into 26ai License: Oracle states it is licensed for 23ai Enterprise Edition. Confirm against the 26ai Licensing Information User Manual before production use. On OCI Base Database Service, the Diagnostics and Tuning Packs are included from the EE tier anyway. Scope: database-level, configured per PDB. No Data Guard or RAC dependency. Companion script: rtspm_test.sql
-
-1. What it is
-
-A plan regression happens when a statement that ran well suddenly gets a worse execution plan, typically after a statistics refresh, a parameter change, an upgrade or a new index. In 19c the usual fixes are manual: find the old plan in AWR, then load a baseline or SQL profile, after the incident has already happened. Automatic SPM in 19c ran as a nightly background task and was restricted to Exadata and Autonomous platforms.
-
-Real-time SPM moves detection into the foreground, at the moment the new plan runs:
-
-History. The Automatic SQL Tuning Set (ASTS, SYS_AUTO_STS) periodically captures SQL statements, plans and their performance from the cursor cache. By default it runs every 15 minutes.
-Detection. At hard parse, the optimizer notices that it has produced a plan not seen before for a statement that has a known-good plan in the ASTS.
-Verification. The new plan executes once. Its performance is compared with the ASTS reference plan by the session that ran it.
-Correction. If the new plan is worse, both plans are stored as SQL plan baselines: the old one accepted, the new one rejected. Subsequent executions use the good plan. If the new plan is better, it is kept.
-Reverse verification. If the optimizer later believes, based on cost, that a rejected plan is now best, it re-checks performance and can reinstate that plan.
-
-Real-time SPM handles only regressions caused by plan changes. It does not help with data growth, contention or a plan that was always bad.
-
-Configuration
-Item	Setting
-Enable	DBMS_SPM.CONFIGURE('AUTO_SPM_EVOLVE_TASK','AUTO')
-Disable	DBMS_SPM.CONFIGURE('AUTO_SPM_EVOLVE_TASK','OFF')
-Prerequisite	OPTIMIZER_CAPTURE_SQL_PLAN_BASELINES = FALSE (baseline auto-capture is a different mechanism)
-Non-autonomous systems	SYS_AUTO_SPM_EVOLVE_TASK parameter ACCEPT_PLANS = TRUE, set as SYS in the PDB
-Privilege	ADMINISTER SQL MANAGEMENT OBJECT
-Observability
-Source	What it shows
-DBA_SQL_PLAN_BASELINES.ORIGIN = 'FOREGROUND-CAPTURE'	baselines created by real-time SPM
-DBA_SQL_PLAN_BASELINES.NOTES	XML: plans compared and their execution statistics
-DBA_SQL_PLAN_BASELINES.FOREGROUND_LAST_VERIFIED	last foreground verification
-V$SQL.SQL_PLAN_BASELINE	which cursor is running under a baseline
-DBA_SQLSET_STATEMENTS (SYS_AUTO_STS)	what history is available for comparison
-DBA_AUTOTASK_SCHEDULE_CONTROL	status of the Auto STS Capture Task and Auto SPM Task
-Fit criteria
-
-Real-time SPM works for repeatable SQL with bind variables, which is typical of OLTP and batch applications. Highly dynamic or literal SQL is out of scope, because each statement is new and has no history to compare against.
-
-2. Test environment
-Oracle 23ai or 26ai EE, one PDB
-Table RTSPM_T: 1M rows, about 220 MB. Columns GRP and GRP2 have 10 rows per value and are indexed. Column UK is unique and not indexed at the start.
-Regressions are induced with DBMS_STATS.SET_COLUMN_STATS(distcnt=>1, no_invalidate=>false). The optimizer then believes the predicate returns every row, picks a full scan that is really about 100× slower, and the next execution hard parses.
-Statements run through EXECUTE IMMEDIATE with binds, so the SQL text and the /* RTSPM_TCx */ tag stay identical on every run.
-Two-phase timeline. Phase 1 runs the good plans and then waits until the ASTS has captured them, at least one capture interval (about 15 minutes). Phase 2 breaks the plans. Phase 2 is only meaningful once the statements are visible in SYS_AUTO_STS.
-3. Test cases
-ID	What it proves	Action	Expected	Pass criteria
-TC1	Core behaviour: a regression is repaired in the foreground	fake statistics flip the index plan to a full scan	the first execution(s) run the bad plan, then the good plan is reinstated automatically	FOREGROUND-CAPTURE baseline: index plan accepted, full plan rejected; later executions back at index speed
-TC2	Safety: an improvement is not blocked	create an index that makes a faster plan available	the new plan is used and kept	new index plan in use; the old full plan is not forced back
-TC3	Limitation: protection needs ASTS history	the good plan is broken before the next ASTS capture	the regression persists; no baseline is created	no FOREGROUND-CAPTURE row; full scan still running
-TC4	Safety: the accepted plan becomes impossible	drop the index behind TC1's accepted plan	the statement still runs with a fallback plan; no errors	statement succeeds; REPRODUCED behaviour recorded
-Results template
-ID	Result	Avg ms before	Avg ms after	Baseline rows (origin / accepted)	Notes
-Pre		—	—	—	AUTO enabled? ASTS task enabled?
-TC1					how many bad executions before the switch
-TC2					baseline created or not
-TC3					
-TC4					REPRODUCED value
-4. Evaluation criteria
-Criterion	Weight	How measured
-Repairs regressions without DBA action	high	TC1
-Does not hold back better plans	high	TC2
-Fails safe when a baseline plan is unusable	high	TC4
-Understood coverage gap	medium	TC3, the ASTS capture window
-Evidence trail for post-incident review	medium	NOTES XML and ORIGIN in TC1
-Operational cost	medium	ASTS and SPM tasks run in the background; storage in SYSAUX
-5. Operational fit
-
-Where it helps
-
-Post-statistics-gather regressions. This is the most common cause of "it was fast yesterday" incidents. TC1 reproduces exactly this pattern.
-Upgrades and patching. An upgrade from 19c changes optimizer behaviour across the board. With ASTS history captured before the upgrade, real-time SPM reverts the individual statements whose plans got worse.
-Shorter incident time. The exposure shrinks from hours (detect, investigate, load a baseline manually) to one or a few bad executions.
-Health-check metric. A daily count of FOREGROUND-CAPTURE baselines measures how many plan regressions occurred and were repaired. That is a trend metric that does not exist in 19c without AWR analysis. The query is in the script.
-
-Limits and risks
-
-No history, no protection. New SQL, or SQL whose good plan was never captured, is not protected (TC3). After the feature is enabled, the ASTS needs time to accumulate history before it gives coverage.
-The first bad execution still happens. The new plan must run at least once to be measured. A single catastrophic execution, such as a long batch query, still completes or must be cancelled before the switch.
-Plan-change regressions only. It does nothing for data growth, locking or resource shortages.
-Data skew. Skew-sensitive statements are left to adaptive cursor sharing, so some of them can regress until ACS adjusts.
-Baselines accumulate. Accepted plans pin behaviour. Periodic review of old FOREGROUND-CAPTURE baselines is needed so they don't block better plans after schema or data changes. The Auto SPM Task evolve process covers part of this.
-Interaction with manual SPM and SQL profiles. Existing baselines and profiles in the fleet need an inventory before enabling, to avoid conflicting fixes.
-6. Summary
-
-Real-time SPM detects plan regressions at the moment the new plan executes. It compares the plan with the known-good plan captured in the Automatic SQL Tuning Set, and if the new plan is worse it reinstates the good plan as an accepted SQL plan baseline. No DBA action is needed. It is configured per PDB with one DBMS_SPM.CONFIGURE call and is licensed with 23ai Enterprise Edition (confirm against the 26ai Licensing Information User Manual).
-
-For a DBA team the value is shorter regression incidents. The usual "stats gather broke a query" pattern is repaired after one or a few bad executions instead of after manual investigation. It also produces a natural health-check metric: the count of repaired regressions per day. Its coverage depends on ASTS history, so it protects established, repeatable SQL and not new or ad-hoc statements. It also cannot prevent the first bad execution.
-
-Recommended position: adopt for OLTP and batch PDBs with repeatable bind-variable SQL. Enable it well before major changes such as 19c→26ai upgrades or statistics policy changes, so the ASTS has history to compare against. Add the FOREGROUND-CAPTURE count to the daily health check, and review accumulated baselines periodically.
+-- =====================================================================
+-- Real-Time SQL Plan Management - test script
+-- Target  : Oracle 23ai / 26ai Enterprise Edition, one PDB
+-- Needs   : ADMINISTER SQL MANAGEMENT OBJECT (DBMS_SPM.CONFIGURE),
+--           SELECT on DBA_* views. One step (ACCEPT_PLANS) is documented
+--           by Oracle as run by SYS in the PDB - see step 0.
+-- Client  : SQL*Plus / SQLcl recommended. All test queries run through
+--           EXECUTE IMMEDIATE so the SQL text (and its /* RTSPM_TCx */
+--           tag) is identical on every run. Static PL/SQL SQL would strip
+--           the comment.
+--
+-- Test cases
+--   TC1  Plan regression detected and repaired in the foreground
+--   TC2  A better new plan is NOT blocked                 (safety)
+--   TC3  No ASTS history yet -> no protection             (limitation)
+--   TC4  Accepted plan becomes non-reproducible            (safety)
+--
+-- TIMELINE - the test has two phases:
+--   Phase 1  create data, run good plans, WAIT for ASTS capture
+--            (Auto STS Capture Task, default interval 15 min)
+--   Phase 2  break plans and observe
+-- =====================================================================
+ 
+set serveroutput on timing on linesize 220 pagesize 200
+column sql_text format a70
+ 
+-- =====================================================================
+-- 0. Preconditions and enablement
+-- =====================================================================
+select banner_full from v$version;
+ 
+-- Real-time SPM status (AUTO = real-time SPM on)
+select parameter_name, parameter_value
+from   dba_sql_management_config
+where  parameter_name = 'AUTO_SPM_EVOLVE_TASK';
+ 
+-- Must be FALSE: real-time SPM is separate from baseline auto-capture
+show parameter optimizer_capture_sql_plan_baselines
+ 
+-- Background tasks: ASTS capture + SPM evolve
+select task_name, enabled, interval, status
+from   dba_autotask_schedule_control
+where  dbid = sys_context('userenv','con_dbid')
+and    task_name in ('Auto STS Capture Task','Auto SPM Task');
+ 
+-- Enable (records previous value above for rollback)
+exec dbms_spm.configure('AUTO_SPM_EVOLVE_TASK','AUTO')
+ 
+-- Per Oracle optimizer blog, on non-autonomous systems run as SYS in the PDB:
+-- exec dbms_spm.set_evolve_task_parameter('SYS_AUTO_SPM_EVOLVE_TASK','ACCEPT_PLANS','TRUE')
+ 
+-- Re-check: AUTO_SPM_EVOLVE_TASK = AUTO, Auto STS Capture Task ENABLED
+ 
+-- =====================================================================
+-- 1. Setup  (~1M rows, ~220 MB)
+-- =====================================================================
+drop table rtspm_t purge;
+create table rtspm_t (
+  id    number       not null,
+  grp   number       not null,   -- TC1 / TC4 : 10 rows per value, indexed
+  grp2  number       not null,   -- TC3       : same data, own index
+  uk    number       not null,   -- TC2       : unique, NOT indexed yet
+  val   number       not null,
+  pad   varchar2(200)
+);
+insert /*+ append */ into rtspm_t
+select level, mod(level,100000), mod(level,100000), level,
+       mod(level,997), rpad('x',200,'x')
+from dual connect by level <= 1000000;
+commit;
+ 
+create index rtspm_grp_ix  on rtspm_t(grp);
+create index rtspm_grp2_ix on rtspm_t(grp2);
+exec dbms_stats.gather_table_stats(user,'RTSPM_T',cascade=>true,method_opt=>'for all columns size 1')
+ 
+-- Runner: execute one tagged statement N times with varying binds
+create or replace procedure rtspm_run(p_sql varchar2, p_n number default 10) is
+  v number;
+  t number := dbms_utility.get_time;
+begin
+  for i in 1..p_n loop
+    execute immediate p_sql into v using mod(i*7919,100000);
+  end loop;
+  dbms_output.put_line('elapsed cs: '||(dbms_utility.get_time - t));
+end;
+/
+ 
+-- Helper query: plans and baselines for the tagged statements
+-- (re-use after every step)
+-- select sql_id, child_number, plan_hash_value, executions,
+--        round(elapsed_time/greatest(executions,1)/1000,2) avg_ms,
+--        sql_plan_baseline, substr(sql_text,1,60) sql_text
+-- from   v$sql where sql_text like 'select /* RTSPM_TC%' order by sql_id, child_number;
+ 
+-- =====================================================================
+-- PHASE 1 - establish good plans and let ASTS capture them
+-- =====================================================================
+-- TC1 good plan: INDEX RANGE SCAN on RTSPM_GRP_IX
+exec rtspm_run('select /* RTSPM_TC1 */ sum(val) from rtspm_t where grp = :g')
+ 
+-- TC2 baseline plan: FULL scan (no index on UK yet)
+exec rtspm_run('select /* RTSPM_TC2 */ sum(val) from rtspm_t where uk = :g', 3)
+ 
+-- Show the plans (expect TC1 index, TC2 full)
+select sql_id, plan_hash_value, executions,
+       round(elapsed_time/greatest(executions,1)/1000,2) avg_ms,
+       substr(sql_text,1,60) sql_text
+from   v$sql where sql_text like 'select /* RTSPM_TC%';
+ 
+-- WAIT until ASTS has captured TC1 and TC2 (poll every few minutes)
+select sql_id, plan_hash_value, executions, substr(sql_text,1,60) sql_text
+from   dba_sqlset_statements
+where  sqlset_owner = 'SYS' and sqlset_name = 'SYS_AUTO_STS'
+and    sql_text like 'select /* RTSPM_TC%';
+-- Continue to PHASE 2 only when both rows are present.
+-- If nothing after 30 min: check 'Auto STS Capture Task' status (step 0).
+ 
+-- =====================================================================
+-- PHASE 2
+-- =====================================================================
+ 
+-- ---------------------------------------------------------------------
+-- TC1 - Regression detected and repaired in the foreground
+-- Make the optimizer believe GRP has 1 distinct value -> it picks a
+-- FULL scan, which is really ~100x slower. no_invalidate=>false forces
+-- a hard parse on next execution.
+-- ---------------------------------------------------------------------
+exec dbms_stats.set_column_stats(user,'RTSPM_T','GRP', distcnt=>1, density=>1, no_invalidate=>false)
+ 
+exec rtspm_run('select /* RTSPM_TC1 */ sum(val) from rtspm_t where grp = :g')
+-- EXPECTED: first execution(s) use the new FULL plan, real-time SPM
+--           compares it with the ASTS plan, then reinstates the index plan.
+ 
+select sql_handle, plan_name, origin, enabled, accepted, reproduced,
+       created, last_verified, foreground_last_verified
+from   dba_sql_plan_baselines
+where  sql_text like 'select /* RTSPM_TC1%'
+order  by created;
+-- EXPECTED: origin FOREGROUND-CAPTURE
+--           index plan  ACCEPTED=YES
+--           full plan   ACCEPTED=NO
+-- (If FOREGROUND_LAST_VERIFIED raises ORA-00904, drop it - column name
+--  differs between builds.)
+ 
+-- Evidence of the decision (plans compared + their statistics)
+select plan_name, accepted, notes
+from   dba_sql_plan_baselines
+where  sql_text like 'select /* RTSPM_TC1%';
+ 
+-- Confirm the running cursor now uses the baseline
+select sql_id, child_number, plan_hash_value, executions,
+       round(elapsed_time/greatest(executions,1)/1000,2) avg_ms, sql_plan_baseline
+from   v$sql where sql_text like 'select /* RTSPM_TC1%';
+-- EXPECTED: newest child has SQL_PLAN_BASELINE populated, index plan hash
+ 
+-- ---------------------------------------------------------------------
+-- TC2 - A better new plan is not blocked
+-- ---------------------------------------------------------------------
+create index rtspm_uk_ix on rtspm_t(uk);
+ 
+exec rtspm_run('select /* RTSPM_TC2 */ sum(val) from rtspm_t where uk = :g', 3)
+ 
+select sql_id, child_number, plan_hash_value, executions,
+       round(elapsed_time/greatest(executions,1)/1000,2) avg_ms, sql_plan_baseline
+from   v$sql where sql_text like 'select /* RTSPM_TC2%';
+select plan_name, origin, enabled, accepted
+from   dba_sql_plan_baselines where sql_text like 'select /* RTSPM_TC2%';
+-- EXPECTED: new INDEX plan in use, faster; if a baseline is created the
+--           index plan is ACCEPTED. The old FULL plan must NOT be forced back.
+ 
+-- ---------------------------------------------------------------------
+-- TC3 - No ASTS history -> no protection
+-- Good plan runs, then is broken BEFORE the next ASTS capture.
+-- Run these steps back to back (well inside the 15 min interval).
+-- ---------------------------------------------------------------------
+exec rtspm_run('select /* RTSPM_TC3 */ sum(val) from rtspm_t where grp2 = :g')
+-- (good plan, index on GRP2)
+ 
+exec dbms_stats.set_column_stats(user,'RTSPM_T','GRP2', distcnt=>1, density=>1, no_invalidate=>false)
+ 
+exec rtspm_run('select /* RTSPM_TC3 */ sum(val) from rtspm_t where grp2 = :g')
+ 
+select plan_name, origin, accepted
+from   dba_sql_plan_baselines where sql_text like 'select /* RTSPM_TC3%';
+-- EXPECTED: no rows - regression stays in place (FULL scan, slow)
+select sql_id, child_number, plan_hash_value,
+       round(elapsed_time/greatest(executions,1)/1000,2) avg_ms
+from   v$sql where sql_text like 'select /* RTSPM_TC3%';
+ 
+-- ---------------------------------------------------------------------
+-- TC4 - Accepted plan becomes non-reproducible
+-- Drop the index behind TC1's accepted baseline plan.
+-- ---------------------------------------------------------------------
+drop index rtspm_grp_ix;
+ 
+exec rtspm_run('select /* RTSPM_TC1 */ sum(val) from rtspm_t where grp = :g', 3)
+-- EXPECTED: statement runs (no error), optimizer falls back to a FULL plan
+ 
+select plan_name, accepted, reproduced
+from   dba_sql_plan_baselines where sql_text like 'select /* RTSPM_TC1%';
+-- EXPECTED / RECORD: index plan REPRODUCED = NO after next parse
+ 
+-- =====================================================================
+-- Monitoring query for the health check (daily)
+-- Number of regressions real-time SPM repaired, per day
+-- =====================================================================
+select trunc(created) day, count(*) foreground_baselines
+from   dba_sql_plan_baselines
+where  origin = 'FOREGROUND-CAPTURE'
+group  by trunc(created) order by 1;
+ 
+-- =====================================================================
+-- Cleanup
+-- =====================================================================
+declare
+  n pls_integer;
+begin
+  for r in (select distinct sql_handle from dba_sql_plan_baselines
+            where sql_text like 'select /* RTSPM_TC%') loop
+    n := dbms_spm.drop_sql_plan_baseline(sql_handle => r.sql_handle);
+  end loop;
+end;
+/
+drop procedure rtspm_run;
+drop table rtspm_t purge;
+-- Restore previous setting if it was not AUTO:
+-- exec dbms_spm.configure('AUTO_SPM_EVOLVE_TASK','<previous value>')
