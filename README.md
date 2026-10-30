@@ -1,98 +1,177 @@
-4. Evolving new plans
-
-Once a statement has a baseline, new plans the optimizer finds are only recorded, not used (§3.1). Evolving is the step that decides whether one of them should be used: the unaccepted plan is test-run, compared with the accepted plan, and accepted if it performs better.
-
-By default, Oracle does this automatically every night. The task SYS_AUTO_SPM_EVOLVE_TASK runs in the maintenance window (as part of the sql tuning advisor autotask client), for up to an hour. Because ACCEPT_PLANS = TRUE by default, every plan that tests better is accepted on the spot, without anyone reviewing it.
-
-What that means in practice:
-
-Good: baselines don't go stale. When data or statistics change and a better plan appears, it's taken into use after being tested, with no DBA effort.
-Risk: a statement you deliberately stabilized with a baseline can get a different plan overnight, outside any change process.
-Risk: the test run uses the bind values stored with the plan, so the new plan is only proven better for those values. For other values it can be worse.
-Note: if the sql tuning advisor autotask client is disabled (often done for Tuning Pack licensing), this task doesn't run either.
-
-Recommendation:
-
-Critical, change-controlled production: set ACCEPT_PLANS = FALSE. The task keeps testing plans and reporting what it found, but nothing changes until a DBA reviews the report and accepts a plan through the change process.
-Other systems: keep the default. A plan is only accepted after it tested better, which is a reasonable safeguard.
-Statements that must not change at all: use FIXED = YES (with a review date) rather than relying on this setting.
-sql
--- Current setting
-SELECT parameter_value
-FROM   dba_advisor_parameters
-WHERE  task_name = 'SYS_AUTO_SPM_EVOLVE_TASK' AND parameter_name = 'ACCEPT_PLANS';
-
--- Switch to report only
-EXEC DBMS_SPM.SET_EVOLVE_TASK_PARAMETER('SYS_AUTO_SPM_EVOLVE_TASK', 'ACCEPT_PLANS', 'FALSE');
-
--- What the last run tested and recommended
-SELECT DBMS_SPM.REPORT_AUTO_EVOLVE_TASK FROM dual;
-5. Risks
-Risk	What happens	Mitigation
-Baseline silently not used	The plan can't be reproduced (index dropped or renamed, object changed, upgrade). The optimizer uses a normal plan; there's no error.	Monitor REPRODUCED = 'NO' and statements that have a baseline but run without it (§7)
-SQL text changes	An application release changes the statement text, even a comment or a literal. It gets a new signature, and the baseline, patch or profile no longer matches.	Check after every release (§7); FORCE_MATCH profiles for literal variants
-Pinned plan gets worse over time	Data grows and a fixed plan becomes slow. Nothing alerts, because the plan didn't change.	Review dates; FIXED only temporarily
-Plans change unattended	Auto-accept brings in a plan that tested better for one set of bind values but is worse for others.	ACCEPT_PLANS = FALSE on critical systems; review the evolve report
-Outdated estimates	A profile's scaling factors are fixed when it's created and become wrong as data changes.	Review profiles; prefer fixing statistics
-Ignored hints	A SQL patch hint is invalid (alias, query block), so it's silently ignored.	+HINT_REPORT after creation; check the Note section
-Several mechanisms on one statement	Profile, patch and baseline interact; nobody can tell which one is causing what.	One mechanism per statement
-Forgotten fixes	Hundreds of undocumented objects accumulate; after an upgrade they can hold the optimizer to old plans that are now worse.	Inventory with ticket and review date; quarterly review
-Plans purged	Baselines not used for 53 weeks (default retention) are purged automatically.	AUTOPURGE = NO for rarely run statements that must keep their plan
-Licensing	SQL profiles (all of DBMS_SQLTUNE) need the Tuning Pack; loading plans from AWR uses the Diagnostics Pack.	Without the Tuning Pack, use baselines and patches only
-6. Governance rules
-Cause first. Every stabilization object has a ticket that names the root cause and why it can't be fixed directly (or by when it will be).
-One mechanism per statement.
-Documented: the ticket, reason and review date go into the object's description (DESCRIPTION attribute or parameter).
-Reviewed quarterly: objects past their review date are either justified again or removed.
-Checked after every application release, patch and upgrade: are the baselines still matched and reproduced (§7)?
-Evolution policy set explicitly per system class (ACCEPT_PLANS, §4). The hourly Automatic SPM mode (19.22+, off by default) stays off unless deliberately piloted.
-No SQL profiles without a Tuning Pack license, including imported or script-built profiles.
-Baselines moved between databases with staging tables (DBMS_SPM.PACK_STGTAB_BASELINE / UNPACK_STGTAB_BASELINE). They are stored per PDB and travel with a PDB clone or plug-in.
-7. Inventory and monitoring
-sql
--- Baselines
-SELECT sql_handle, plan_name, enabled, accepted, fixed, reproduced, autopurge,
-       origin, created, last_executed, description
-FROM   dba_sql_plan_baselines
-ORDER  BY created DESC;
-
--- Profiles and patches
-SELECT name, category, status, force_matching, created, description FROM dba_sql_profiles;
-SELECT name, category, status, created, description FROM dba_sql_patches;
-
--- Which mechanism each cursor is using right now
-SELECT sql_id, plan_hash_value, sql_plan_baseline, sql_profile, sql_patch
-FROM   v$sql
-WHERE  sql_plan_baseline IS NOT NULL OR sql_profile IS NOT NULL OR sql_patch IS NOT NULL;
-
--- Statements that have an accepted baseline but are running without it
-SELECT s.sql_id, s.plan_hash_value, b.sql_handle, b.plan_name, b.reproduced
-FROM   v$sql s
-JOIN   dba_sql_plan_baselines b ON b.signature = s.exact_matching_signature
-WHERE  b.enabled = 'YES' AND b.accepted = 'YES'
-AND    s.sql_plan_baseline IS NULL;
-
-Expected result of the last query: no rows. Every row is a baseline that is no longer doing its job, usually because the plan can't be reproduced.
-
-8. Review checklist
- Root cause analysed; stabilization justified in a ticket.
- The right tool for the situation (§2); one mechanism per statement.
- Description holds ticket, reason and review date.
- Plan verified after creation: the Note section shows the mechanism; for patches, the hint report is clean.
- Bad cursor purged so the fix takes effect.
- ACCEPT_PLANS set according to the system class; FIXED only with a review date.
- No SQL profiles on systems without a Tuning Pack license.
- Post-release and post-upgrade check of unused or unreproduced baselines.
- Quarterly inventory review.
-9. Quick reference: common mistakes
-Symptom	Cause
-Baseline created, but the bad plan keeps running	Old cursor still in the cursor cache; purge it
-Baseline exists, SQL_PLAN_BASELINE empty in V$SQL	Plan can't be reproduced (object changed) or text no longer matches
-Fix stopped working after an application release	Statement text changed (comment, literal, formatting beyond case and spaces)
-Plan changed overnight on a statement "pinned" with a baseline	Auto-evolve accepted a new plan (ACCEPT_PLANS = TRUE)
-Fixed plan, slow months later	Data grew; nobody reviewed the fixed plan
-SQL patch has no effect	Hint invalid or not fully qualified; check +HINT_REPORT
-Profile works for one statement but not its literal variants	Created without FORCE_MATCH
-License audit finding on SQL profiles	Profiles created or imported without a Tuning Pack license
-Old fixes hurt after an upgrade	Undocumented stabilization objects never reviewed; plans tuned for the previous optimizer
-Rarely run report lost its plan	Baseline unused for over a year was auto-purged; set AUTOPURGE = NO
+-- =============================================================================
+-- Connection pooling check from the traditional audit trail (DBA_AUDIT_SESSION)
+--
+-- Idea: with AUDIT SESSION, each session is one row. The row is written at
+-- logon and updated at logoff (LOGOFF_TIME, ACTION_NAME = 'LOGOFF'), so
+-- session duration and logon rate can be read per application and per host.
+--
+--   Correct pooling : few logons, long sessions (close to the pool's max
+--                     lifetime, e.g. 20-30 min), flat number of open
+--                     sessions per host (= pool size).
+--   No pooling      : many logons, sessions of a few seconds or less.
+--   Pool churn      : sessions of seconds to minutes; pool grows and shrinks.
+--
+-- Run in the PDB (the traditional audit trail is per container).
+-- DBA_AUDIT_SESSION reads SYS.AUD$, which usually has no index on time:
+-- keep the window short on large audit trails, or run off-peak.
+-- =============================================================================
+ 
+DEFINE days_back = 1
+DEFINE app_user  = 'APP_USER'
+ 
+-- -----------------------------------------------------------------------------
+-- 0. Prerequisites: logons must be audited into the database
+--    audit_trail must be DB or DB,EXTENDED (OS/XML write to files instead)
+--    and CREATE SESSION must be audited.
+-- -----------------------------------------------------------------------------
+SELECT name, value FROM v$parameter WHERE name = 'audit_trail';
+ 
+SELECT user_name, audit_option, success, failure
+FROM   dba_stmt_audit_opts
+WHERE  audit_option = 'CREATE SESSION';
+ 
+-- Oldest record available (the window must be within retention)
+SELECT MIN(timestamp) AS oldest_record FROM dba_audit_session;
+ 
+ 
+-- -----------------------------------------------------------------------------
+-- 1. Overview per application user, with a verdict
+--    Thresholds are starting points; set them from your pool's max lifetime.
+-- -----------------------------------------------------------------------------
+WITH s AS (
+  SELECT username,
+         userhost,
+         action_name,
+         returncode,
+         CASE WHEN returncode = 0 AND logoff_time IS NOT NULL
+              THEN (logoff_time - timestamp) * 86400 END AS dur_s
+  FROM   dba_audit_session
+  WHERE  timestamp > SYSDATE - &days_back
+  AND    username NOT IN ('SYS', 'SYSTEM', 'DBSNMP', 'SYSMAN')
+),
+agg AS (
+  SELECT username,
+         COUNT(DISTINCT userhost)                                             AS hosts,
+         SUM(CASE WHEN returncode = 0 THEN 1 ELSE 0 END)                      AS logons,
+         SUM(CASE WHEN returncode <> 0 THEN 1 ELSE 0 END)                     AS failed_logons,
+         SUM(CASE WHEN action_name = 'LOGOFF BY CLEANUP' THEN 1 ELSE 0 END)   AS cleaned_up,
+         SUM(CASE WHEN action_name = 'LOGON' AND returncode = 0 THEN 1 ELSE 0 END) AS still_open,
+         COUNT(dur_s)                                                         AS completed,
+         PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY dur_s)                   AS median_s,
+         SUM(CASE WHEN dur_s < 60 THEN 1 ELSE 0 END)                          AS under_1min
+  FROM   s
+  GROUP  BY username
+)
+SELECT username,
+       hosts,
+       logons,
+       ROUND(logons / (24 * &days_back), 1)                          AS logons_per_hour,
+       ROUND(logons / NULLIF(hosts, 0) / (24 * &days_back), 1)       AS logons_per_host_hour,
+       ROUND(median_s)                                               AS median_session_s,
+       ROUND(100 * under_1min / NULLIF(completed, 0), 1)             AS pct_under_1min,
+       still_open,
+       cleaned_up,
+       failed_logons,
+       CASE
+         WHEN completed = 0                                 THEN 'NO COMPLETED SESSIONS IN WINDOW'
+         WHEN median_s < 10                                 THEN 'NO POOLING: new session per request'
+         WHEN median_s < 300 OR under_1min > 0.2 * completed THEN 'POOL CHURN: sessions too short-lived'
+         ELSE                                                    'POOLED'
+       END                                                           AS verdict,
+       RTRIM(
+         CASE WHEN cleaned_up > 0.05 * logons THEN 'sessions not closed cleanly; ' END ||
+         CASE WHEN failed_logons > 0           THEN 'failed logons; '              END,
+         '; ')                                                       AS also_check
+FROM   agg
+ORDER  BY logons DESC;
+ 
+ 
+-- -----------------------------------------------------------------------------
+-- 2. One application, per host (pod / server)
+--    STILL_OPEN on a live host should equal the pool size.
+--    A host with many logons and short sessions = a misbehaving pod
+--    (crash loop, health probe connecting, missing pool).
+-- -----------------------------------------------------------------------------
+SELECT userhost,
+       MIN(timestamp)                                                  AS first_logon,
+       MAX(timestamp)                                                  AS last_logon,
+       SUM(CASE WHEN returncode = 0 THEN 1 ELSE 0 END)                 AS logons,
+       ROUND(PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY
+             CASE WHEN returncode = 0 AND logoff_time IS NOT NULL
+                  THEN (logoff_time - timestamp) * 86400 END))         AS median_session_s,
+       SUM(CASE WHEN action_name = 'LOGON' AND returncode = 0 THEN 1 ELSE 0 END) AS still_open,
+       SUM(CASE WHEN action_name = 'LOGOFF BY CLEANUP' THEN 1 ELSE 0 END) AS cleaned_up,
+       SUM(CASE WHEN returncode <> 0 THEN 1 ELSE 0 END)                AS failed_logons
+FROM   dba_audit_session
+WHERE  timestamp > SYSDATE - &days_back
+AND    username = '&app_user'
+GROUP  BY userhost
+ORDER  BY logons DESC;
+ 
+ 
+-- -----------------------------------------------------------------------------
+-- 3. One application: how long sessions live
+--    Pooled: most sessions in the bucket that contains the pool's max lifetime.
+--    Not pooled: most sessions under 10 s.
+-- -----------------------------------------------------------------------------
+SELECT bucket, COUNT(*) AS sessions
+FROM  (SELECT CASE
+                WHEN d < 1    THEN '1: < 1 s'
+                WHEN d < 10   THEN '2: 1-10 s'
+                WHEN d < 60   THEN '3: 10-60 s'
+                WHEN d < 600  THEN '4: 1-10 min'
+                WHEN d < 3600 THEN '5: 10-60 min'
+                ELSE               '6: > 1 h'
+              END AS bucket
+       FROM  (SELECT (logoff_time - timestamp) * 86400 AS d
+              FROM   dba_audit_session
+              WHERE  timestamp > SYSDATE - &days_back
+              AND    username = '&app_user'
+              AND    returncode = 0
+              AND    logoff_time IS NOT NULL))
+GROUP  BY bucket
+ORDER  BY bucket;
+ 
+ 
+-- -----------------------------------------------------------------------------
+-- 4. One application: open sessions per host, hour by hour
+--    Flat at the pool size        = static pool (min = max), as required.
+--    Going up and down            = dynamic pool (min < max).
+--    Above the agreed pool size   = more than one pool per host, or setting not applied.
+-- -----------------------------------------------------------------------------
+WITH points AS (
+  SELECT TRUNC(SYSDATE, 'HH24') - (LEVEL - 1) / 24 AS ts
+  FROM   dual
+  CONNECT BY LEVEL <= 24 * &days_back
+),
+sess AS (
+  SELECT userhost, timestamp AS logon_time, logoff_time
+  FROM   dba_audit_session
+  WHERE  username = '&app_user'
+  AND    returncode = 0
+  AND    timestamp > SYSDATE - &days_back - 2      -- sessions opened before the window
+  AND    (logoff_time IS NULL OR logoff_time > SYSDATE - &days_back)
+)
+SELECT p.ts, s.userhost, COUNT(*) AS open_sessions
+FROM   points p
+JOIN   sess s
+       ON  s.logon_time <= p.ts
+       AND (s.logoff_time > p.ts OR s.logoff_time IS NULL)
+GROUP  BY p.ts, s.userhost
+ORDER  BY s.userhost, p.ts;
+ 
+ 
+-- -----------------------------------------------------------------------------
+-- 5. Failed logons by error code
+--    1017  = invalid username/password (often a pool retrying with old credentials)
+--    18    = maximum number of sessions exceeded (SESSIONS limit reached)
+--    28000 = account locked
+--    2391  = SESSIONS_PER_USER limit exceeded
+-- -----------------------------------------------------------------------------
+SELECT username, userhost, returncode, COUNT(*) AS attempts,
+       MIN(timestamp) AS first_seen, MAX(timestamp) AS last_seen
+FROM   dba_audit_session
+WHERE  timestamp > SYSDATE - &days_back
+AND    returncode <> 0
+GROUP  BY username, userhost, returncode
+ORDER  BY attempts DESC;
