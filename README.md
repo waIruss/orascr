@@ -1,11 +1,13 @@
-SELECT value FROM v$parameter WHERE name = 'control_management_pack_access';
-SELECT snap_interval, retention FROM dba_hist_wr_control;
-SELECT SYS_CONTEXT('USERENV','CON_NAME') con, COUNT(*) snaps,
-       MIN(end_interval_time) oldest, MAX(end_interval_time) newest,
-       COUNT(DISTINCT instance_number) insts
-FROM   dba_hist_snapshot WHERE end_interval_time > SYSTIMESTAMP - 7;
-SELECT 'SYS_TIME_MODEL' src, con_id, COUNT(*) cnt FROM dba_hist_sys_time_model
-WHERE stat_name = 'DB time' GROUP BY con_id
-UNION ALL
-SELECT 'CON_SYS_TIME_MODEL', con_id, COUNT(*) FROM dba_hist_con_sys_time_model
-WHERE stat_name = 'DB time' GROUP BY con_id;
+SELECT 'CON_SYSTEM_EVENT' src, COUNT(*) cnt FROM dba_hist_con_system_event
+UNION ALL SELECT 'CON_SYSSTAT',     COUNT(*) FROM dba_hist_con_sysstat
+UNION ALL SELECT 'OSSTAT',          COUNT(*) FROM dba_hist_osstat
+UNION ALL SELECT 'IOSTAT_FUNCTION', COUNT(*) FROM dba_hist_iostat_function;
+
+SELECT COUNT(*) cnt, MAX(cpu_utilization_limit) cpu_limit FROM dba_hist_rsrc_pdb_metric;
+
+SELECT event_name, COUNT(*) cnt FROM dba_hist_con_system_event
+WHERE  event_name IN ('db file sequential read','direct path read','log file sync','log file parallel write')
+GROUP  BY event_name;
+
+SELECT COUNT(*) snaps, MIN(end_interval_time) oldest, MAX(end_interval_time) newest FROM dba_hist_snapshot;
+SELECT value cpu_count FROM v$parameter WHERE name = 'cpu_count';
