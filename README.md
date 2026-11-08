@@ -182,14 +182,20 @@
   .errbox { background: var(--red-bg); color: var(--red); padding: 12px 14px; border-radius: 8px; font: 13px/1.5 var(--mono); white-space: pre-wrap; }
   .note { color: var(--muted); font-size: 13px; font-style: italic; }
 
-  /* detail panels */
-  .sec-head { margin: 22px 0 4px; font-size: 14px; color: var(--ink-2); }
-  details { border: 1px solid var(--line); border-radius: 8px; margin: 8px 0; }
-  summary { display: flex; align-items: center; gap: 10px; padding: 9px 14px; cursor: pointer; list-style: none; }
+  /* foldable main sections (details.section) and check panels (details.item) */
+  summary { cursor: pointer; list-style: none; }
   summary::-webkit-details-marker { display: none; }
   summary::before { content: "\25B8"; color: var(--muted); transition: transform .15s ease; }
-  details[open] > summary { border-bottom: 1px solid var(--line-2); }
   details[open] > summary::before { transform: rotate(90deg); }
+  details.section { margin-top: 44px; }
+  details.section > summary { display: flex; align-items: center; gap: 10px; padding-bottom: 8px; border-bottom: 1px solid var(--line); }
+  details.section[open] > summary { margin-bottom: 12px; }
+  details.section > summary h2 { margin: 0; padding: 0; border: 0; }
+  details.section > summary:hover h2 { color: #1c5cab; }
+  .sec-head { margin: 22px 0 4px; font-size: 14px; color: var(--ink-2); }
+  details.item { border: 1px solid var(--line); border-radius: 8px; margin: 8px 0; }
+  details.item > summary { display: flex; align-items: center; gap: 10px; padding: 9px 14px; }
+  details.item[open] > summary { border-bottom: 1px solid var(--line-2); }
   summary .t { flex: 1; font-weight: 600; }
   summary .secs { color: var(--muted); font-size: 13px; font-variant-numeric: tabular-nums; }
   .panel { padding: 12px 14px 14px; }
@@ -221,6 +227,7 @@
     .kpis, .verdict, tr, summary { break-inside: avoid; }
     h2, h3 { break-after: avoid; }
     a { color: inherit; text-decoration: none; }
+    summary::before { display: none; }
   }
 </style>
 </head>
@@ -310,8 +317,9 @@
 </div>
 
 {#- ---------- summary ---------- -#}
-<h2 id="sec-summary">Summary
-  {%- for s, n in counts.items() if n %} <span class="badge {{ s }}">{{ n }} {{ s }}</span>{% endfor %}</h2>
+<details class="section" id="sec-summary" open>
+<summary><h2>Summary
+  {%- for s, n in counts.items() if n %} <span class="badge {{ s }}">{{ n }} {{ s }}</span>{% endfor %}</h2></summary>
 <div class="tablewrap">
 <table class="summary">
   <thead><tr><th>Check</th><th class="c">Status</th><th class="r">Time (s)</th><th>Errors</th></tr></thead>
@@ -332,11 +340,13 @@
   {%- endfor %}
 </table>
 </div>
+</details>
 
 {#- ---------- overview tables (STATUS column, if present and not first, colours the row) ---------- -#}
 {%- set ov = results | selectattr('section', 'in', table_sections) | list %}
 {%- if ov %}
-<h2 id="sec-overview">Overview</h2>
+<details class="section" id="sec-overview" open>
+<summary><h2>Overview</h2></summary>
 {%- for r in ov %}
 {%-   set lines = (r.output | default('')).splitlines() %}
 <h3>{{ r.short_desc }}</h3>
@@ -364,6 +374,7 @@
 <p class="note">No table in the output (status {{ r.status }}), see <a href="#{{ r.script }}">its details</a>.</p>
 {%-   endif %}
 {%- endfor %}
+</details>
 {%- endif %}
 
 {#- ---------- trends: section, chart CSS and Google Charts code live in trends.html.j2 ---------- -#}
@@ -375,7 +386,7 @@
 {%-   set rs = results | selectattr('section', 'equalto', s) | list %}
 <h3 class="sec-head" id="{{ slug(s) }}">{{ human(s) }}</h3>
 {%-   for r in rs %}
-<details id="{{ r.script }}"{% if r.status != 'OK' %} open{% endif %}>
+<details class="item" id="{{ r.script }}"{% if r.status != 'OK' %} open{% endif %}>
   <summary><span class="badge {{ r.status }}">{{ r.status }}</span><span class="t">{{ r.short_desc }}</span><span class="secs">{{ r.seconds }} s</span></summary>
   <div class="panel">
     {%- if descs[r.script] | default('') | trim %}
@@ -415,12 +426,24 @@
   var saved = null;
   window.addEventListener('beforeprint', function () { saved = all().map(function (d) { return d.open; }); all().forEach(function (d) { d.open = true; }); });
   window.addEventListener('afterprint', function () { if (saved) { all().forEach(function (d, i) { d.open = saved[i]; }); } saved = null; });
+  /* an in-page link opens its target and every folded section around it */
+  var reveal = function (id) { for (var el = document.getElementById(id); el; el = el.parentElement) { if (el.tagName === 'DETAILS') el.open = true; } };
+  document.addEventListener('click', function (e) {
+    var a = e.target.closest ? e.target.closest('a[href^="#"]') : null;
+    if (a) reveal(decodeURIComponent(a.getAttribute('href').slice(1)));
+  });
+  if (location.hash) reveal(decodeURIComponent(location.hash.slice(1)));
 })();
 </script>
 </body>
 </html>
 
 
+
+
+
+
+======
 
 {#- Trends section, included from report.html.j2 (after the Overview tables).
     Uses `charts` (parsed at the top of report.html.j2) and `awr_days`.
@@ -439,7 +462,8 @@
   @media (max-width: 960px) { .charts { grid-template-columns: 1fr; } }
   @media print { .hint { display: none; } .chart { break-inside: avoid; } }
 </style>
-<h2 id="sec-trends">Trends<span class="count">last {{ awr_days | default(7) }} days, database server time</span></h2>
+<details class="section" id="sec-trends" open>
+<summary><h2>Trends<span class="count">last {{ awr_days | default(7) }} days, database server time</span></h2></summary>
 <div class="charts">
 {%- for c in charts %}
 {%-   if c.ok %}
@@ -455,6 +479,7 @@
 {%- endfor %}
 </div>
 <p class="note hint">Hover a chart for values. Drag to zoom, right-click to reset.</p>
+</details>
 {%- if charts | selectattr('ok') | list %}
 <script src="https://www.gstatic.com/charts/loader.js"></script>
 <script>
@@ -527,21 +552,22 @@
       explorer: {actions: ['dragToZoom', 'rightClickToReset'], axis: 'horizontal', maxZoomIn: 0.05}
     };
     var chart = new (stacked ? google.visualization.AreaChart : google.visualization.LineChart)(plot);
-    return function () { chart.draw(dt, opts); };
+    return function () { if (plot.offsetWidth) chart.draw(dt, opts); };   /* skip while the section is folded */
   }
 
   google.charts.load('current', {packages: ['corechart']});
   google.charts.setOnLoadCallback(function () {
     var draws = cards.map(prepare).filter(Boolean);
-    draws.forEach(function (d) { d(); });
-    var t;
-    window.addEventListener('resize', function () { clearTimeout(t); t = setTimeout(function () { draws.forEach(function (d) { d(); }); }, 200); });
+    var redraw = function () { draws.forEach(function (d) { d(); }); };
+    redraw();
+    var sec = document.getElementById('sec-trends'), t;
+    if (sec) sec.addEventListener('toggle', function () { if (sec.open) redraw(); });
+    window.addEventListener('resize', function () { clearTimeout(t); t = setTimeout(redraw, 200); });
   });
 })();
 </script>
 {%- endif %}
 {%- endif %}
-
 
 
 
