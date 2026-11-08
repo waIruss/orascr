@@ -119,19 +119,23 @@
   button:hover { background: var(--tint); }
 
   /* verdict band */
-  .verdict { margin: 28px 0 16px; padding: 20px 24px 18px; border: 1px solid var(--line); border-left: 6px solid var(--v); border-radius: 10px; }
-  .v-OK { --v: var(--green); } .v-ERRORS { --v: #d29b00; } .v-FAILED, .v-TIMEOUT { --v: var(--red); }
-  .v-top { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
-  .verdict h1 { margin: 0; font-size: 40px; line-height: 1.1; font-weight: 700; letter-spacing: -.02em; overflow-wrap: anywhere; }
-  .verdict h1 .what { margin-left: 8px; font-size: 20px; font-weight: 400; letter-spacing: 0; color: var(--muted); }
-  .v-sentence { margin: 8px 0 0; font-size: 20px; font-weight: 600; color: var(--ink-2); }
+  .verdict { margin: 28px 0 16px; border: 1px solid var(--line); border-left: 6px solid var(--v); border-radius: 10px; overflow: hidden; }
+  .v-OK     { --v: var(--green); --vbg: var(--green-bg); --vline: #bfe3c9; }
+  .v-ERRORS { --v: #d29b00;      --vbg: var(--amber-bg); --vline: #f1dfa6; }
+  .v-FAILED, .v-TIMEOUT { --v: var(--red); --vbg: var(--red-bg); --vline: #f5c6c0; }
+  .v-head { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 18px 24px;
+            background: var(--vbg); border-bottom: 1px solid var(--vline); }
+  .verdict h1 { margin: 0; font-size: 38px; line-height: 1.15; font-weight: 700; letter-spacing: -.02em; overflow-wrap: anywhere; }
+  .v-head .badge { background: #fff; box-shadow: inset 0 0 0 1px var(--vline); }
+  .v-body { padding: 14px 24px 18px; }
+  .v-sentence { margin: 0; font-size: 20px; font-weight: 600; color: var(--ink-2); }
   .v-att { margin: 10px 0 0; font-size: 14px; color: var(--ink-2); }
   .v-att a { margin-right: 12px; }
-  .facts { display: grid; grid-template-columns: repeat(auto-fit, minmax(128px, 1fr)); gap: 10px 24px;
-           margin: 16px 0 0; padding-top: 14px; border-top: 1px solid var(--line-2); }
+  .facts { display: flex; flex-wrap: wrap; gap: 10px 40px; margin: 16px 0 0; padding-top: 14px; border-top: 1px solid var(--line-2); }
   .facts div { min-width: 0; }
   .facts dt { font-size: 13px; color: var(--muted); }
   .facts dd { margin: 0; font-weight: 600; overflow-wrap: anywhere; }
+  .facts dd.nowrap { white-space: nowrap; }
 
   /* KPI strip */
   .kpis { display: grid; grid-template-columns: repeat(5, 1fr); gap: 1px; background: var(--line-2);
@@ -214,10 +218,12 @@
   @media (max-width: 560px) {
     .wrap { padding: 0 16px; }
     .kpis { grid-template-columns: 1fr; }
-    .v-top { flex-direction: column; }
+    .v-head { flex-direction: column; align-items: flex-start; padding: 16px 18px; }
+    .v-body { padding: 14px 18px 16px; }
     .verdict h1 { font-size: 30px; }
     .v-sentence { font-size: 17px; }
-    .facts { grid-template-columns: 1fr 1fr; }
+    .facts { gap: 10px 20px; }
+    .facts div { flex: 1 1 40%; }
     #expand-all, #collapse-all { display: none; }
   }
   @media (prefers-reduced-motion: reduce) { summary::before { transition: none; } }
@@ -225,6 +231,7 @@
     .topbar { display: none !important; }
     .wrap { max-width: none; padding: 0; }
     .verdict { margin-top: 0; }
+    .v-head, .badge, .kpi { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
     pre { max-height: none; overflow: visible; white-space: pre-wrap; }
     .kpis, .verdict, tr, summary { break-inside: avoid; }
     h2, h3 { break-after: avoid; }
@@ -259,13 +266,12 @@
 <main class="wrap">
 
 <section class="verdict v-{{ verdict }}">
-  <div class="v-top">
-    <div>
-      <h1>{{ database_tnsname }}<span class="what">health check</span></h1>
-      <p class="v-sentence">{{ sentence }}</p>
-    </div>
+  <div class="v-head">
+    <h1>{{ database_tnsname }} Health Check</h1>
     <span class="badge lg {{ verdict }}">{{ verdict }}</span>
   </div>
+  <div class="v-body">
+  <p class="v-sentence">{{ sentence }}</p>
   {%- if bad %}
   <p class="v-att">Needs attention:
     {%- for r in bad %} <a href="#{{ r.script }}">{{ r.short_desc }}</a>{% endfor %}</p>
@@ -274,11 +280,12 @@
     <div><dt>Container</dt><dd>{{ dbi.con_name | default('–') }}</dd></div>
     <div><dt>Database</dt><dd>{{ dbi.db_name | default('–') }}</dd></div>
     <div><dt>Role</dt><dd>{{ dbi.database_role | default('–') }}</dd></div>
-    <div><dt>Run</dt><dd>{{ run_ts }}</dd></div>
+    <div><dt>Run</dt><dd class="nowrap">{{ run_ts }}</dd></div>
     {%- if run_id %}<div><dt>Run id</dt><dd>{{ run_id | e }}</dd></div>{% endif %}
     <div><dt>Database user</dt><dd>{{ database_user | default('–') }}</dd></div>
     <div><dt>Executed from</dt><dd>{{ inventory_hostname }}</dd></div>
   </dl>
+  </div>
 </section>
 
 {% if not conn_ok %}
@@ -358,7 +365,7 @@
 
 {#- ---------- summary ---------- -#}
 <details class="section" id="sec-summary" open>
-<summary><h2>Summary for Health Check scripts
+<summary><h2>Summary of health check
   {%- for s, n in counts.items() if n %} <span class="badge {{ s }}">{{ n }} {{ s }}</span>{% endfor %}</h2></summary>
 <div class="tablewrap">
 <table class="summary">
